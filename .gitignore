@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# Local printer address — copy from printer_config.example.json
+printer_config.json
