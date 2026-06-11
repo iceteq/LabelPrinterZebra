@@ -1,3 +1,4 @@
+import argparse
 import json
 import socket
 import tkinter as tk
@@ -34,7 +35,18 @@ def _build_zpl(title: str, serial: str) -> str:
     )
 
 
-def _ask_label_fields():
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Print a barcode label on a Zebra printer.")
+    parser.add_argument(
+        "title",
+        nargs="?",
+        default="",
+        help="Default text for the label title field (e.g. Act, Serienummer, Req)",
+    )
+    return parser.parse_args()
+
+
+def _ask_label_fields(default_title: str = ""):
     root = tk.Tk()
     root.title("Print label")
     root.resizable(False, False)
@@ -44,7 +56,7 @@ def _ask_label_fields():
     frame.grid(row=0, column=0)
 
     ttk.Label(frame, text="Title:").grid(row=0, column=0, sticky="w", pady=(0, 6))
-    title_var = tk.StringVar(value="Act")
+    title_var = tk.StringVar(value=default_title)
     title_entry = ttk.Entry(frame, textvariable=title_var, width=32)
     title_entry.grid(row=0, column=1, pady=(0, 6))
 
@@ -100,8 +112,8 @@ def _ask_label_fields():
     return result["title"], result["serial"]
 
 
-def print_label():
-    fields = _ask_label_fields()
+def print_label(default_title: str = ""):
+    fields = _ask_label_fields(default_title)
     if fields is None:
         return
     title, serial = fields
@@ -112,4 +124,4 @@ def print_label():
 
 
 if __name__ == "__main__":
-    print_label()
+    print_label(_parse_args().title)
