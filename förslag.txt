@@ -1,0 +1,2 @@
+- ahk hotkey to open this with different inputs for the top input field … for example Act, req, ordernummer, serienummer
+- pass that Word as argument.. no argument, no text input in the first input field
