@@ -62,7 +62,7 @@ def _ask_label_fields():
                 "Enter a barcode value to print.",
                 parent=root,
             )
-            serial_entry.focus_set()
+            serial_entry.focus_force()
             return
         result["title"] = title_var.get().strip()
         result["serial"] = serial_var.get().strip()
@@ -85,11 +85,14 @@ def _ask_label_fields():
     root.bind("<Escape>", lambda _event: on_cancel())
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
-    serial_entry.focus_set()
+    def focus_serial_entry():
+        root.lift()
+        root.attributes("-topmost", True)
+        serial_entry.focus_force()
+
     root.update_idletasks()
-    root.lift()
-    root.attributes("-topmost", True)
-    root.focus_force()
+    root.after(0, focus_serial_entry)
+    root.after(100, focus_serial_entry)
     root.mainloop()
 
     if result["cancelled"]:
