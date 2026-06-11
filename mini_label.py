@@ -1,6 +1,7 @@
 import argparse
 import json
 import socket
+import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -35,6 +36,58 @@ def _build_zpl(title: str, serial: str) -> str:
     )
 
 
+_UI_SCALE = 2
+
+
+def _work_area_origin_and_size(window: tk.Tk) -> tuple[int, int, int, int]:
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", RECT),
+                ("rcWork", RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        cursor = POINT()
+        user32.GetCursorPos(ctypes.byref(cursor))
+        monitor = user32.MonitorFromPoint(cursor, 2)  # MONITOR_DEFAULTTONEAREST
+        if monitor:
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                work = info.rcWork
+                return work.left, work.top, work.right - work.left, work.bottom - work.top
+
+    return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
+
+
+def _center_window(window: tk.Tk) -> None:
+    window.update_idletasks()
+    width = window.winfo_reqwidth()
+    height = window.winfo_reqheight()
+    area_x, area_y, area_w, area_h = _work_area_origin_and_size(window)
+    x = area_x + max(0, (area_w - width) // 2)
+    y = area_y + max(0, (area_h - height) // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
+    window.deiconify()
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(description="Print a barcode label on a Zebra printer.")
     parser.add_argument(
@@ -47,18 +100,24 @@ def _parse_args():
 
 
 def _ask_label_fields(default_title: str = ""):
+    pad = 12 * _UI_SCALE
+
     root = tk.Tk()
+    root.withdraw()
     root.title("Print label")
     root.resizable(False, False)
     root.attributes("-topmost", True)
+    root.tk.call("tk", "scaling", float(root.tk.call("tk", "scaling")) * _UI_SCALE)
 
-    frame = ttk.Frame(root, padding=12)
+    frame = ttk.Frame(root, padding=pad)
     frame.grid(row=0, column=0)
 
-    ttk.Label(frame, text="Title:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+    ttk.Label(frame, text="Title:").grid(
+        row=0, column=0, sticky="w", pady=(0, 6 * _UI_SCALE)
+    )
     title_var = tk.StringVar(value=default_title)
     title_entry = ttk.Entry(frame, textvariable=title_var, width=32)
-    title_entry.grid(row=0, column=1, pady=(0, 6))
+    title_entry.grid(row=0, column=1, pady=(0, 6 * _UI_SCALE))
 
     ttk.Label(frame, text="Barcode value:").grid(row=1, column=0, sticky="w")
     serial_var = tk.StringVar()
@@ -85,9 +144,9 @@ def _ask_label_fields(default_title: str = ""):
         root.destroy()
 
     buttons = ttk.Frame(frame)
-    buttons.grid(row=2, column=0, columnspan=2, pady=(12, 0))
+    buttons.grid(row=2, column=0, columnspan=2, pady=(pad, 0))
     ttk.Button(buttons, text="Print", command=on_print, width=10).grid(
-        row=0, column=0, padx=(0, 6)
+        row=0, column=0, padx=(0, 6 * _UI_SCALE)
     )
     ttk.Button(buttons, text="Cancel", command=on_cancel, width=10).grid(
         row=0, column=1
@@ -102,7 +161,7 @@ def _ask_label_fields(default_title: str = ""):
         root.attributes("-topmost", True)
         serial_entry.focus_force()
 
-    root.update_idletasks()
+    _center_window(root)
     root.after(0, focus_serial_entry)
     root.after(100, focus_serial_entry)
     root.mainloop()
