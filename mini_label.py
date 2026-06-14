@@ -1,8 +1,12 @@
 import argparse
+import base64
 import json
 import socket
 import sys
+import threading
 import tkinter as tk
+import urllib.error
+import urllib.request
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -37,6 +41,69 @@ def _build_zpl(title: str, serial: str) -> str:
 
 
 _UI_SCALE = 2
+_LABELARY_DPMM = 8
+_LABELARY_WIDTH_IN = 4
+_LABELARY_HEIGHT_IN = 2
+_PREVIEW_DEBOUNCE_MS = 400
+_PREVIEW_MAX_WIDTH = 360
+_PREVIEW_MAX_HEIGHT = 140
+# Gap between the status line and the button row.
+_BUTTON_GAP = 6
+_STATUS_MAX_CHARS = 72
+
+
+def _status_line(message: str) -> str:
+    text = " ".join(message.split())
+    if len(text) <= _STATUS_MAX_CHARS:
+        return text
+    return text[: _STATUS_MAX_CHARS - 1] + "…"
+
+def _labelary_url() -> str:
+    return (
+        f"http://api.labelary.com/v1/printers/"
+        f"{_LABELARY_DPMM}dpmm/labels/{_LABELARY_WIDTH_IN}x{_LABELARY_HEIGHT_IN}/0/"
+    )
+
+
+def _fetch_labelary_png(zpl: str) -> bytes:
+    request = urllib.request.Request(
+        _labelary_url(),
+        data=zpl.encode("utf-8"),
+        headers={
+            "Accept": "image/png",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        message = detail or exc.reason
+        raise RuntimeError(f"Labelary error ({exc.code}): {message}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Preview unavailable: {exc.reason}") from exc
+
+
+def _png_to_photo(png_data: bytes, max_width: int = _PREVIEW_MAX_WIDTH) -> tk.PhotoImage:
+    photo = tk.PhotoImage(data=base64.b64encode(png_data))
+    if photo.width() > max_width:
+        factor = max(2, (photo.width() + max_width - 1) // max_width)
+        photo = photo.subsample(factor, factor)
+    return photo
+
+
+def _preview_zpl(title: str, serial: str) -> str:
+    barcode = serial.strip() or "0"
+    return _build_zpl(title.strip(), barcode)
+
+
+def _send_zpl(zpl: str) -> tuple[str, int]:
+    host, port = _load_printer_config()
+    with socket.create_connection((host, port), timeout=5) as sock:
+        sock.sendall(zpl.encode("utf-8"))
+    return host, port
 
 
 def _work_area_origin_and_size(window: tk.Tk) -> tuple[int, int, int, int]:
@@ -77,10 +144,10 @@ def _work_area_origin_and_size(window: tk.Tk) -> tuple[int, int, int, int]:
     return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
 
 
-def _center_window(window: tk.Tk) -> None:
+def _center_window(window: tk.Tk, *, height: int | None = None) -> None:
     window.update_idletasks()
     width = window.winfo_reqwidth()
-    height = window.winfo_reqheight()
+    height = height or window.winfo_reqheight()
     area_x, area_y, area_w, area_h = _work_area_origin_and_size(window)
     x = area_x + max(0, (area_w - width) // 2)
     y = area_y + max(0, (area_h - height) // 2)
@@ -111,6 +178,8 @@ def _ask_label_fields(default_title: str = ""):
 
     frame = ttk.Frame(root, padding=pad)
     frame.grid(row=0, column=0)
+    preview_row_height = (24 * _UI_SCALE) + (6 * _UI_SCALE) * 2 + _PREVIEW_MAX_HEIGHT
+    frame.grid_rowconfigure(2, minsize=preview_row_height)
 
     ttk.Label(frame, text="Title:").grid(
         row=0, column=0, sticky="w", pady=(0, 6 * _UI_SCALE)
@@ -124,7 +193,74 @@ def _ask_label_fields(default_title: str = ""):
     serial_entry = ttk.Entry(frame, textvariable=serial_var, width=32)
     serial_entry.grid(row=1, column=1)
 
-    result = {"cancelled": True}
+    preview_frame = ttk.LabelFrame(frame, text="Preview", padding=6 * _UI_SCALE)
+    preview_frame.grid(
+        row=2, column=0, columnspan=2, sticky="w", pady=(pad, 0)
+    )
+    preview_frame.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
+    preview_label = ttk.Label(
+        preview_frame,
+        text="Loading preview...",
+        anchor="center",
+        justify="center",
+    )
+    preview_label.grid(row=0, column=0, sticky="n")
+
+    preview_state = {"photo": None, "request_id": 0, "after_id": None, "closed": False}
+
+    def apply_preview(request_id: int, png_data: bytes | None, error: str | None) -> None:
+        if preview_state["closed"] or request_id != preview_state["request_id"]:
+            return
+        if png_data is None:
+            preview_state["photo"] = None
+            preview_label.configure(image="", text=error or "Preview unavailable")
+            return
+        photo = _png_to_photo(png_data)
+        preview_state["photo"] = photo
+        preview_label.configure(image=photo, text="")
+
+    def refresh_preview() -> None:
+        request_id = preview_state["request_id"] + 1
+        preview_state["request_id"] = request_id
+        zpl = _preview_zpl(title_var.get(), serial_var.get())
+
+        def fetch() -> None:
+            try:
+                png_data = _fetch_labelary_png(zpl)
+                error = None
+            except RuntimeError as exc:
+                png_data = None
+                error = str(exc)
+            if not preview_state["closed"]:
+                root.after(0, lambda: apply_preview(request_id, png_data, error))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def schedule_preview(*_args: object) -> None:
+        after_id = preview_state["after_id"]
+        if after_id is not None:
+            root.after_cancel(after_id)
+        preview_state["after_id"] = root.after(_PREVIEW_DEBOUNCE_MS, refresh_preview)
+
+    title_var.trace_add("write", schedule_preview)
+    serial_var.trace_add("write", schedule_preview)
+
+    status_var = tk.StringVar(value="")
+    status_style = ttk.Style()
+    status_style.configure("Status.TLabel", font=("Segoe UI", 8), foreground="red")
+    status_label = ttk.Label(
+        frame,
+        textvariable=status_var,
+        style="Status.TLabel",
+    )
+    status_label.grid(
+        row=3, column=0, columnspan=2, sticky="nw", pady=(2 * _UI_SCALE, 0)
+    )
+
+    def set_printing(enabled: bool) -> None:
+        state = ["!disabled"] if enabled else ["disabled"]
+        print_button.state(state)
+        cancel_button.state(state)
 
     def on_print():
         if not serial_var.get().strip():
@@ -135,24 +271,64 @@ def _ask_label_fields(default_title: str = ""):
             )
             serial_entry.focus_force()
             return
-        result["title"] = title_var.get().strip()
-        result["serial"] = serial_var.get().strip()
-        result["cancelled"] = False
+
+        title = title_var.get().strip()
+        serial = serial_var.get().strip()
+        zpl = _build_zpl(title, serial)
+
+        set_printing(False)
+        status_var.set(_status_line("Sending to printer..."))
+        root.update_idletasks()
+
+        try:
+            host, port = _load_printer_config()
+            status_var.set(_status_line(f"Connecting to {host}:{port}..."))
+            root.update_idletasks()
+            _send_zpl(zpl)
+        except FileNotFoundError as exc:
+            status_var.set(_status_line(str(exc)))
+            set_printing(True)
+            serial_entry.focus_force()
+            return
+        except OSError as exc:
+            try:
+                host, port = _load_printer_config()
+                target = f"{host}:{port}"
+            except FileNotFoundError:
+                target = "printer"
+            status_var.set(_status_line(f"Could not connect to {target}: {exc}"))
+            set_printing(True)
+            serial_entry.focus_force()
+            return
+        except Exception as exc:
+            status_var.set(_status_line(f"Print failed: {type(exc).__name__}: {exc}"))
+            set_printing(True)
+            serial_entry.focus_force()
+            return
+
+        preview_state["closed"] = True
+        after_id = preview_state["after_id"]
+        if after_id is not None:
+            root.after_cancel(after_id)
         root.destroy()
 
     def on_cancel():
+        preview_state["closed"] = True
+        after_id = preview_state["after_id"]
+        if after_id is not None:
+            root.after_cancel(after_id)
         root.destroy()
 
     buttons = ttk.Frame(frame)
-    buttons.grid(row=2, column=0, columnspan=2, pady=(pad, 0))
-    ttk.Button(buttons, text="Print", command=on_print, width=10).grid(
-        row=0, column=0, padx=(0, 6 * _UI_SCALE)
-    )
-    ttk.Button(buttons, text="Cancel", command=on_cancel, width=10).grid(
-        row=0, column=1
-    )
+    buttons.grid(row=4, column=0, columnspan=2, sticky="w", pady=(_BUTTON_GAP, 0))
+    print_button = ttk.Button(buttons, text="Print", command=on_print)
+    print_button.pack(side=tk.LEFT)
+    cancel_button = ttk.Button(buttons, text="Cancel", command=on_cancel)
+    cancel_button.pack(side=tk.LEFT, padx=(6, 0))
 
-    root.bind("<Return>", lambda _event: on_print())
+    for sequence in ("<Return>", "<KP_Enter>"):
+        root.bind(sequence, lambda _event: on_print())
+        serial_entry.bind(sequence, lambda _event: on_print())
     root.bind("<Escape>", lambda _event: on_cancel())
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
@@ -162,24 +338,14 @@ def _ask_label_fields(default_title: str = ""):
         serial_entry.focus_force()
 
     _center_window(root)
+    schedule_preview()
     root.after(0, focus_serial_entry)
     root.after(100, focus_serial_entry)
     root.mainloop()
 
-    if result["cancelled"]:
-        return None
-    return result["title"], result["serial"]
-
 
 def print_label(default_title: str = ""):
-    fields = _ask_label_fields(default_title)
-    if fields is None:
-        return
-    title, serial = fields
-    zpl = _build_zpl(title, serial)
-    host, port = _load_printer_config()
-    with socket.create_connection((host, port), timeout=5) as sock:
-        sock.sendall(zpl.encode("utf-8"))
+    _ask_label_fields(default_title)
 
 
 if __name__ == "__main__":
