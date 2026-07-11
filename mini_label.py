@@ -7,6 +7,7 @@ import threading
 import tkinter as tk
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -30,20 +31,87 @@ def _zpl_field(text: str) -> str:
     return text.replace("^", "^^").replace("~", "~~")
 
 
-def _build_zpl(title: str, serial: str) -> str:
-    # ^CI28 = UTF-8; ^BC f=Y prints interpretation line below the bars
+_LABELARY_DPMM = 8
+_LABELARY_WIDTH_IN = 4
+_LABELARY_HEIGHT_IN = 2
+_MARGIN = 50
+_TITLE_FONT_H = 50
+_TITLE_FONT_W = 50
+_BARCODE_HEIGHT = 120
+_BARCODE_MODULE = 3
+_GAP_TITLE_BARCODE = 10
+_TITLE_Y = _MARGIN
+_BARCODE_Y = _MARGIN + _TITLE_FONT_H + _GAP_TITLE_BARCODE
+
+_H_ALIGN = {"left": "L", "center": "C", "right": "R"}
+
+
+def _label_dots(width_in: float, height_in: float, dpmm: int) -> tuple[int, int]:
+    dots_per_in = dpmm * 25.4
+    return round(width_in * dots_per_in), round(height_in * dots_per_in)
+
+
+_LABEL_WIDTH, _LABEL_HEIGHT = _label_dots(
+    _LABELARY_WIDTH_IN, _LABELARY_HEIGHT_IN, _LABELARY_DPMM
+)
+
+
+@dataclass(frozen=True)
+class LabelLayout:
+    align: str = "left"
+
+    def __post_init__(self) -> None:
+        if self.align not in _H_ALIGN:
+            raise ValueError(f"align must be one of {list(_H_ALIGN)}")
+
+
+def _text_zpl(
+    y: int,
+    text: str,
+    font_h: int,
+    font_w: int,
+    h_align: str,
+) -> str:
+    block_w = _LABEL_WIDTH - 2 * _MARGIN
+    zpl_align = _H_ALIGN[h_align]
     return (
-        "^XA^CI28"
-        f"^FO50,40^A0N,50,50^FD{_zpl_field(title)}^FS"
-        f"^FO50,100^BY3,3,120^BCN,120,Y,N,N^FD{_zpl_field(serial)}^FS"
+        f"^FO{_MARGIN},{y}^FB{block_w},1,0,{zpl_align},0"
+        f"^A0N,{font_h},{font_w}^FD{_zpl_field(text)}^FS"
+    )
+
+
+def _estimate_barcode_width(serial: str) -> int:
+    modules = (len(serial) + 3) * 11
+    return modules * _BARCODE_MODULE
+
+
+def _barcode_x(serial: str, h_align: str) -> int:
+    width = _estimate_barcode_width(serial)
+    block_w = _LABEL_WIDTH - 2 * _MARGIN
+    if h_align == "left":
+        return _MARGIN
+    if h_align == "right":
+        return max(_MARGIN, _LABEL_WIDTH - _MARGIN - width)
+    return _MARGIN + max(0, (block_w - width) // 2)
+
+
+def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> str:
+    layout = layout or LabelLayout()
+    barcode_x = _barcode_x(serial, layout.align)
+
+    return (
+        "^XA"
+        "^CI28"
+        f"^PW{_LABEL_WIDTH}"
+        f"^LL{_LABEL_HEIGHT}"
+        f"{_text_zpl(_TITLE_Y, title, _TITLE_FONT_H, _TITLE_FONT_W, layout.align)}"
+        f"^FO{barcode_x},{_BARCODE_Y}^BY{_BARCODE_MODULE},3,{_BARCODE_HEIGHT}"
+        f"^BCN,{_BARCODE_HEIGHT},Y,N,N^FD{_zpl_field(serial)}^FS"
         "^XZ"
     )
 
 
 _UI_SCALE = 2
-_LABELARY_DPMM = 8
-_LABELARY_WIDTH_IN = 4
-_LABELARY_HEIGHT_IN = 2
 _PREVIEW_DEBOUNCE_MS = 400
 _PREVIEW_MAX_WIDTH = 360
 _PREVIEW_MAX_HEIGHT = 140
@@ -94,9 +162,9 @@ def _png_to_photo(png_data: bytes, max_width: int = _PREVIEW_MAX_WIDTH) -> tk.Ph
     return photo
 
 
-def _preview_zpl(title: str, serial: str) -> str:
+def _preview_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> str:
     barcode = serial.strip() or "0"
-    return _build_zpl(title.strip(), barcode)
+    return _build_zpl(title.strip(), barcode, layout)
 
 
 def _send_zpl(zpl: str) -> tuple[str, int]:
@@ -163,10 +231,17 @@ def _parse_args():
         default="",
         help="Default text for the label title field (e.g. Act, Serienummer, Req)",
     )
+    parser.add_argument(
+        "--align",
+        choices=sorted(_H_ALIGN),
+        default="left",
+        help="Horizontal alignment for title and barcode",
+    )
     return parser.parse_args()
 
 
-def _ask_label_fields(default_title: str = ""):
+def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None):
+    layout = layout or LabelLayout()
     pad = 12 * _UI_SCALE
 
     root = tk.Tk()
@@ -179,7 +254,7 @@ def _ask_label_fields(default_title: str = ""):
     frame = ttk.Frame(root, padding=pad)
     frame.grid(row=0, column=0)
     preview_row_height = (24 * _UI_SCALE) + (6 * _UI_SCALE) * 2 + _PREVIEW_MAX_HEIGHT
-    frame.grid_rowconfigure(2, minsize=preview_row_height)
+    frame.grid_rowconfigure(3, minsize=preview_row_height)
 
     ttk.Label(frame, text="Title:").grid(
         row=0, column=0, sticky="w", pady=(0, 6 * _UI_SCALE)
@@ -193,9 +268,23 @@ def _ask_label_fields(default_title: str = ""):
     serial_entry = ttk.Entry(frame, textvariable=serial_var, width=32)
     serial_entry.grid(row=1, column=1)
 
+    ttk.Label(frame, text="Align:").grid(row=2, column=0, sticky="w", pady=(6 * _UI_SCALE, 0))
+    align_var = tk.StringVar(value=layout.align)
+    align_combo = ttk.Combobox(
+        frame,
+        textvariable=align_var,
+        values=sorted(_H_ALIGN),
+        state="readonly",
+        width=10,
+    )
+    align_combo.grid(row=2, column=1, sticky="w", pady=(6 * _UI_SCALE, 0))
+
+    def current_layout() -> LabelLayout:
+        return LabelLayout(align=align_var.get())
+
     preview_frame = ttk.LabelFrame(frame, text="Preview", padding=6 * _UI_SCALE)
     preview_frame.grid(
-        row=2, column=0, columnspan=2, sticky="w", pady=(pad, 0)
+        row=3, column=0, columnspan=2, sticky="w", pady=(pad, 0)
     )
     preview_frame.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
     preview_label = ttk.Label(
@@ -222,7 +311,7 @@ def _ask_label_fields(default_title: str = ""):
     def refresh_preview() -> None:
         request_id = preview_state["request_id"] + 1
         preview_state["request_id"] = request_id
-        zpl = _preview_zpl(title_var.get(), serial_var.get())
+        zpl = _preview_zpl(title_var.get(), serial_var.get(), current_layout())
 
         def fetch() -> None:
             try:
@@ -244,6 +333,8 @@ def _ask_label_fields(default_title: str = ""):
 
     title_var.trace_add("write", schedule_preview)
     serial_var.trace_add("write", schedule_preview)
+    align_var.trace_add("write", schedule_preview)
+    align_combo.bind("<<ComboboxSelected>>", schedule_preview)
 
     status_var = tk.StringVar(value="")
     status_style = ttk.Style()
@@ -254,7 +345,7 @@ def _ask_label_fields(default_title: str = ""):
         style="Status.TLabel",
     )
     status_label.grid(
-        row=3, column=0, columnspan=2, sticky="nw", pady=(2 * _UI_SCALE, 0)
+        row=4, column=0, columnspan=2, sticky="nw", pady=(2 * _UI_SCALE, 0)
     )
 
     def set_printing(enabled: bool) -> None:
@@ -274,7 +365,7 @@ def _ask_label_fields(default_title: str = ""):
 
         title = title_var.get().strip()
         serial = serial_var.get().strip()
-        zpl = _build_zpl(title, serial)
+        zpl = _build_zpl(title, serial, current_layout())
 
         set_printing(False)
         status_var.set(_status_line("Sending to printer..."))
@@ -320,7 +411,7 @@ def _ask_label_fields(default_title: str = ""):
         root.destroy()
 
     buttons = ttk.Frame(frame)
-    buttons.grid(row=4, column=0, columnspan=2, sticky="w", pady=(_BUTTON_GAP, 0))
+    buttons.grid(row=5, column=0, columnspan=2, sticky="w", pady=(_BUTTON_GAP, 0))
     print_button = ttk.Button(buttons, text="Print", command=on_print)
     print_button.pack(side=tk.LEFT)
     cancel_button = ttk.Button(buttons, text="Cancel", command=on_cancel)
@@ -344,9 +435,10 @@ def _ask_label_fields(default_title: str = ""):
     root.mainloop()
 
 
-def print_label(default_title: str = ""):
-    _ask_label_fields(default_title)
+def print_label(default_title: str = "", layout: LabelLayout | None = None):
+    _ask_label_fields(default_title, layout)
 
 
 if __name__ == "__main__":
-    print_label(_parse_args().title)
+    args = _parse_args()
+    print_label(args.title, LabelLayout(align=args.align))

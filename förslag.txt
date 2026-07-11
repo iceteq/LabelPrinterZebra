@@ -1,2 +1,23 @@
 - ahk hotkey to open this with different inputs for the top input field … for example Act, req, ordernummer, serienummer
 - pass that Word as argument.. no argument, no text input in the first input field
+
+
+
+- ibland händer inget när jag printar.. och det går inte att se var det gick fel. behöver en loggfunktion som sparar i ett dokument
+datumet och stegen som gick igenom. 
+
+
+- vore nice med en "Allt i lådan hör till act: "
+och sen act barcoden under
+
+
+
+
+- ibland blir streckkoden för lång för min label, och då går det inte längre att skanna den. 
+
+
+- det vore snyggt om du hade en option att centrera allting vertikalt
+- om jag skippar att skriva en barcode, så ska det hanteras som en label utan barcode.. dvs visa inte någon barcode
+- om jag skippar titeln, så ska du bara visa barcode
+- möjlighet att välja stor text (den under barcode) 
+- möjlighet att välja stor/liten text på catpion ovanför barcoden)
