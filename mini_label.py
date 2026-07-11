@@ -42,6 +42,7 @@ _BARCODE_MODULE = 3
 _GAP_TITLE_BARCODE = 10
 _TITLE_Y = _MARGIN
 _BARCODE_Y = _MARGIN + _TITLE_FONT_H + _GAP_TITLE_BARCODE
+_TEXT_ONLY_MAX_LINES = 8
 
 _H_ALIGN = {"left": "L", "center": "C", "right": "R"}
 
@@ -71,12 +72,31 @@ def _text_zpl(
     font_h: int,
     font_w: int,
     h_align: str,
+    *,
+    max_lines: int = 1,
 ) -> str:
     block_w = _LABEL_WIDTH - 2 * _MARGIN
     zpl_align = _H_ALIGN[h_align]
     return (
-        f"^FO{_MARGIN},{y}^FB{block_w},1,0,{zpl_align},0"
+        f"^FO{_MARGIN},{y}^FB{block_w},{max_lines},0,{zpl_align},0"
         f"^A0N,{font_h},{font_w}^FD{_zpl_field(text)}^FS"
+    )
+
+
+def _zpl_header() -> str:
+    return (
+        "^XA"
+        "^CI28"
+        f"^PW{_LABEL_WIDTH}"
+        f"^LL{_LABEL_HEIGHT}"
+    )
+
+
+def _barcode_zpl(serial: str, h_align: str) -> str:
+    barcode_x = _barcode_x(serial, h_align)
+    return (
+        f"^FO{barcode_x},{_BARCODE_Y}^BY{_BARCODE_MODULE},3,{_BARCODE_HEIGHT}"
+        f"^BCN,{_BARCODE_HEIGHT},Y,N,N^FD{_zpl_field(serial)}^FS"
     )
 
 
@@ -97,17 +117,27 @@ def _barcode_x(serial: str, h_align: str) -> int:
 
 def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> str:
     layout = layout or LabelLayout()
-    barcode_x = _barcode_x(serial, layout.align)
+    header = _zpl_header()
+
+    if serial.strip():
+        return (
+            header
+            + _text_zpl(_TITLE_Y, title, _TITLE_FONT_H, _TITLE_FONT_W, layout.align)
+            + _barcode_zpl(serial, layout.align)
+            + "^XZ"
+        )
 
     return (
-        "^XA"
-        "^CI28"
-        f"^PW{_LABEL_WIDTH}"
-        f"^LL{_LABEL_HEIGHT}"
-        f"{_text_zpl(_TITLE_Y, title, _TITLE_FONT_H, _TITLE_FONT_W, layout.align)}"
-        f"^FO{barcode_x},{_BARCODE_Y}^BY{_BARCODE_MODULE},3,{_BARCODE_HEIGHT}"
-        f"^BCN,{_BARCODE_HEIGHT},Y,N,N^FD{_zpl_field(serial)}^FS"
-        "^XZ"
+        header
+        + _text_zpl(
+            _MARGIN,
+            title,
+            _TITLE_FONT_H,
+            _TITLE_FONT_W,
+            layout.align,
+            max_lines=_TEXT_ONLY_MAX_LINES,
+        )
+        + "^XZ"
     )
 
 
@@ -163,8 +193,7 @@ def _png_to_photo(png_data: bytes, max_width: int = _PREVIEW_MAX_WIDTH) -> tk.Ph
 
 
 def _preview_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> str:
-    barcode = serial.strip() or "0"
-    return _build_zpl(title.strip(), barcode, layout)
+    return _build_zpl(title.strip(), serial.strip(), layout)
 
 
 def _send_zpl(zpl: str) -> tuple[str, int]:
@@ -354,17 +383,17 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         cancel_button.state(state)
 
     def on_print():
-        if not serial_var.get().strip():
-            messagebox.showwarning(
-                "Missing value",
-                "Enter a barcode value to print.",
-                parent=root,
-            )
-            serial_entry.focus_force()
-            return
-
         title = title_var.get().strip()
         serial = serial_var.get().strip()
+        if not serial and not title:
+            messagebox.showwarning(
+                "Missing value",
+                "Enter text in Title or a barcode value to print.",
+                parent=root,
+            )
+            title_entry.focus_force()
+            return
+
         zpl = _build_zpl(title, serial, current_layout())
 
         set_printing(False)
@@ -420,6 +449,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     for sequence in ("<Return>", "<KP_Enter>"):
         root.bind(sequence, lambda _event: on_print())
         serial_entry.bind(sequence, lambda _event: on_print())
+        title_entry.bind(sequence, lambda _event: on_print())
     root.bind("<Escape>", lambda _event: on_cancel())
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
