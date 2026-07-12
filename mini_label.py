@@ -126,32 +126,6 @@ def _text_zpl(
     )
 
 
-def _estimate_text_width(text: str, font_w: int) -> int:
-    return len(text) * font_w
-
-
-def _single_line_text_x(text: str, font_w: int, h_align: str) -> int:
-    width = _estimate_text_width(text, font_w)
-    block_w = _LABEL_WIDTH - 2 * _MARGIN
-    if h_align == "left":
-        return _MARGIN
-    if h_align == "right":
-        return max(_MARGIN, _LABEL_WIDTH - _MARGIN - width)
-    return _MARGIN + max(0, (block_w - width) // 2)
-
-
-def _single_line_text_zpl(
-    y: int,
-    text: str,
-    font_h: int,
-    font_w: int,
-    h_align: str,
-) -> str:
-    line = " ".join(text.split())
-    x = _single_line_text_x(line, font_w, h_align)
-    return f"^FO{x},{y}^A0N,{font_h},{font_w}^FD{_zpl_field(line)}^FS"
-
-
 def _zpl_header() -> str:
     return (
         "^XA"
@@ -191,10 +165,11 @@ def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> st
     header = _zpl_header()
 
     if serial.strip():
+        title_line = " ".join(title.split())
         return (
             header
-            + _single_line_text_zpl(
-                _TITLE_Y, title, _TITLE_FONT_H, _TITLE_FONT_W, layout.align
+            + _text_zpl(
+                _TITLE_Y, title_line, _TITLE_FONT_H, _TITLE_FONT_W, layout.align
             )
             + _barcode_zpl(serial, layout.align)
             + "^XZ"
