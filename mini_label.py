@@ -1,6 +1,7 @@
 import argparse
 import base64
 import json
+import re
 import socket
 import sys
 import threading
@@ -14,6 +15,8 @@ from tkinter import messagebox, ttk
 _CONFIG_DIR = Path(__file__).resolve().parent
 _CONFIG_PATH = _CONFIG_DIR / "printer_config.json"
 _EXAMPLE_NAME = "printer_config.example.json"
+_BARCODE_ESCAPES_PATH = _CONFIG_DIR / "barcode_escapes.json"
+_BARCODE_ESCAPES_EXAMPLE = _CONFIG_DIR / "barcode_escapes.example.json"
 
 
 def _load_printer_config():
@@ -29,6 +32,51 @@ def _load_printer_config():
 
 def _zpl_field(text: str) -> str:
     return text.replace("^", "^^").replace("~", "~~")
+
+
+def _load_barcode_escapes() -> dict[str, str]:
+    if _BARCODE_ESCAPES_PATH.is_file():
+        path = _BARCODE_ESCAPES_PATH
+    elif _BARCODE_ESCAPES_EXAMPLE.is_file():
+        path = _BARCODE_ESCAPES_EXAMPLE
+    else:
+        return {"enter": "\r"}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    keywords = data.get("keywords", data)
+    if not isinstance(keywords, dict):
+        raise ValueError(f"{path.name} must contain a 'keywords' object.")
+    return {str(name).lower(): str(char) for name, char in keywords.items()}
+
+
+def _barcode_escape_hint(escapes: dict[str, str]) -> str:
+    names = ", ".join(f"{{{name}}}" for name in sorted(escapes))
+    return f"Barcode value ({names}):" if names else "Barcode value:"
+
+
+def _decode_barcode_input(text: str, escapes: dict[str, str] | None = None) -> str:
+    escapes = escapes if escapes is not None else _load_barcode_escapes()
+    result = text
+    for name, char in escapes.items():
+        pattern = r"\{" + re.escape(name) + r"\}"
+        result = re.sub(pattern, char, result, flags=re.IGNORECASE)
+    return result
+
+
+def _zpl_fh_payload(data: str) -> str:
+    parts: list[str] = []
+    for ch in data:
+        if ch == "_":
+            parts.append("__")
+        elif ch == "^":
+            parts.append("^^")
+        elif ch == "~":
+            parts.append("~~")
+        elif ord(ch) < 32 or ord(ch) > 126:
+            parts.append(f"_{ord(ch):02X}")
+        else:
+            parts.append(ch)
+    return "".join(parts)
 
 
 _LABELARY_DPMM = 8
@@ -119,10 +167,12 @@ def _zpl_header() -> str:
 
 
 def _barcode_zpl(serial: str, h_align: str) -> str:
-    barcode_x = _barcode_x(serial, h_align)
+    payload = _decode_barcode_input(serial)
+    barcode_x = _barcode_x(payload, h_align)
+    encoded = _zpl_fh_payload(payload)
     return (
         f"^FO{barcode_x},{_BARCODE_Y}^BY{_BARCODE_MODULE},3,{_BARCODE_HEIGHT}"
-        f"^BCN,{_BARCODE_HEIGHT},Y,N,N^FD{_zpl_field(serial)}^FS"
+        f"^FH^BCN,{_BARCODE_HEIGHT},Y,N,N^FD{encoded}^FS"
     )
 
 
@@ -299,6 +349,7 @@ def _parse_args():
 
 def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None):
     layout = layout or LabelLayout()
+    barcode_escapes = _load_barcode_escapes()
     pad = 12 * _UI_SCALE
 
     root = tk.Tk()
@@ -320,7 +371,9 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     title_entry = ttk.Entry(frame, textvariable=title_var, width=32)
     title_entry.grid(row=0, column=1, pady=(0, 6 * _UI_SCALE))
 
-    ttk.Label(frame, text="Barcode value:").grid(row=1, column=0, sticky="w")
+    ttk.Label(frame, text=_barcode_escape_hint(barcode_escapes)).grid(
+        row=1, column=0, sticky="w"
+    )
     serial_var = tk.StringVar()
     serial_entry = ttk.Entry(frame, textvariable=serial_var, width=32)
     serial_entry.grid(row=1, column=1)
