@@ -49,11 +49,6 @@ def _load_barcode_escapes() -> dict[str, str]:
     return {str(name).lower(): str(char) for name, char in keywords.items()}
 
 
-def _barcode_escape_hint(escapes: dict[str, str]) -> str:
-    names = ", ".join(f"{{{name}}}" for name in sorted(escapes))
-    return f"Barcode value ({names}):" if names else "Barcode value:"
-
-
 def _decode_barcode_input(text: str, escapes: dict[str, str] | None = None) -> str:
     escapes = escapes if escapes is not None else _load_barcode_escapes()
     result = text
@@ -349,7 +344,6 @@ def _parse_args():
 
 def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None):
     layout = layout or LabelLayout()
-    barcode_escapes = _load_barcode_escapes()
     pad = 12 * _UI_SCALE
 
     root = tk.Tk()
@@ -371,9 +365,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     title_entry = ttk.Entry(frame, textvariable=title_var, width=32)
     title_entry.grid(row=0, column=1, pady=(0, 6 * _UI_SCALE))
 
-    ttk.Label(frame, text=_barcode_escape_hint(barcode_escapes)).grid(
-        row=1, column=0, sticky="w"
-    )
+    ttk.Label(frame, text="Barcode value:").grid(row=1, column=0, sticky="w")
     serial_var = tk.StringVar()
     serial_entry = ttk.Entry(frame, textvariable=serial_var, width=32)
     serial_entry.grid(row=1, column=1)
