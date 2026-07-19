@@ -90,6 +90,8 @@ _TEXT_ONLY_MAX_LINES = 8
 _AUTHOR = "Anton"
 _STAMP_FONT_H = 18
 _STAMP_FONT_W = 14
+# Calibrated to printable width: ABCDEFGHIJKLMNOPQRSTUVWXY (25 chars).
+_MAX_TITLE_CHARS = 25
 
 _H_ALIGN = {"left": "L", "center": "C", "right": "R"}
 
@@ -128,6 +130,15 @@ def _text_zpl(
         f"^FO{_MARGIN},{y}^FB{block_w},{max_lines},0,{zpl_align},0"
         f"^A0N,{font_h},{font_w}^FD{_zpl_field(text)}^FS"
     )
+
+
+def _truncate_to_printable_width(text: str) -> str:
+    """Fit one line; max length calibrated to ABCDEFGHIJKLMNOPQRSTUVWXY."""
+    if len(text) <= _MAX_TITLE_CHARS:
+        return text
+    ellipsis = "..."
+    keep = max(0, _MAX_TITLE_CHARS - len(ellipsis))
+    return text[:keep] + ellipsis
 
 
 def _zpl_header() -> str:
@@ -182,7 +193,7 @@ def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> st
     signature = _signature_zpl()
 
     if serial.strip():
-        title_line = " ".join(title.split())
+        title_line = _truncate_to_printable_width(" ".join(title.split()))
         return (
             header
             + _text_zpl(
