@@ -90,8 +90,15 @@ _TEXT_ONLY_MAX_LINES = 8
 _AUTHOR = "Anton"
 _STAMP_FONT_H = 18
 _STAMP_FONT_W = 14
-# Calibrated to printable width: ABCDEFGHIJKLMNOPQRSTUVWXY (25 chars).
-_MAX_TITLE_CHARS = 25
+# Relative advance widths as fractions of title font height (calibrated so
+# ABCDEFGHIJKLMNOPQRSTUVWXY ≈ fills the printable width).
+_CHAR_WIDTH_SPACE = 0.28
+_CHAR_WIDTH_NARROW = 0.35
+_CHAR_WIDTH_LOWER = 0.48
+_CHAR_WIDTH_UPPER = 0.57
+_CHAR_WIDTH_WIDE = 0.85
+_NARROW_CHARS = set("iltrfjI.:;,!|'\"`")
+_WIDE_CHARS = set("mw@%")  # lowercase / symbols; A–Z use upper weight (incl. M, W)
 
 _H_ALIGN = {"left": "L", "center": "C", "right": "R"}
 
@@ -132,13 +139,41 @@ def _text_zpl(
     )
 
 
-def _truncate_to_printable_width(text: str) -> str:
-    """Fit one line; max length calibrated to ABCDEFGHIJKLMNOPQRSTUVWXY."""
-    if len(text) <= _MAX_TITLE_CHARS:
+def _char_width_dots(ch: str, font_h: int) -> float:
+    if ch == " " or ch == "\t":
+        return font_h * _CHAR_WIDTH_SPACE
+    if ch in _NARROW_CHARS:
+        return font_h * _CHAR_WIDTH_NARROW
+    if ch in _WIDE_CHARS:
+        return font_h * _CHAR_WIDTH_WIDE
+    if ch.isupper() or ch.isdigit():
+        return font_h * _CHAR_WIDTH_UPPER
+    return font_h * _CHAR_WIDTH_LOWER
+
+
+def _text_width_dots(text: str, font_h: int) -> float:
+    return sum(_char_width_dots(ch, font_h) for ch in text)
+
+
+def _truncate_to_printable_width(text: str, font_h: int = _TITLE_FONT_H) -> str:
+    """Fit one line using weighted glyph widths vs printable label width."""
+    block_w = float(_LABEL_WIDTH - 2 * _MARGIN)
+    if _text_width_dots(text, font_h) <= block_w:
         return text
     ellipsis = "..."
-    keep = max(0, _MAX_TITLE_CHARS - len(ellipsis))
-    return text[:keep] + ellipsis
+    ellipsis_w = _text_width_dots(ellipsis, font_h)
+    budget = block_w - ellipsis_w
+    if budget <= 0:
+        return ellipsis
+    kept: list[str] = []
+    used = 0.0
+    for ch in text:
+        w = _char_width_dots(ch, font_h)
+        if used + w > budget:
+            break
+        kept.append(ch)
+        used += w
+    return "".join(kept) + ellipsis
 
 
 def _zpl_header() -> str:
@@ -187,10 +222,18 @@ def _signature_zpl() -> str:
     )
 
 
-def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> str:
+def _build_zpl(
+    title: str,
+    serial: str,
+    layout: LabelLayout | None = None,
+    *,
+    copies: int = 1,
+) -> str:
     layout = layout or LabelLayout()
     header = _zpl_header()
     signature = _signature_zpl()
+    quantity = max(1, min(10, int(copies)))
+    pq = f"^PQ{quantity}"
 
     if serial.strip():
         title_line = _truncate_to_printable_width(" ".join(title.split()))
@@ -201,6 +244,7 @@ def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> st
             )
             + _barcode_zpl(serial, layout.align)
             + signature
+            + pq
             + "^XZ"
         )
 
@@ -215,6 +259,7 @@ def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> st
             max_lines=_TEXT_ONLY_MAX_LINES,
         )
         + signature
+        + pq
         + "^XZ"
     )
 
@@ -361,7 +406,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     frame = ttk.Frame(root, padding=pad)
     frame.grid(row=0, column=0)
     preview_row_height = (24 * _UI_SCALE) + (6 * _UI_SCALE) * 2 + _PREVIEW_MAX_HEIGHT
-    frame.grid_rowconfigure(3, minsize=preview_row_height)
+    frame.grid_rowconfigure(4, minsize=preview_row_height)
 
     ttk.Label(frame, text="Title:").grid(
         row=0, column=0, sticky="w", pady=(0, 6 * _UI_SCALE)
@@ -386,12 +431,29 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     )
     align_combo.grid(row=2, column=1, sticky="w", pady=(6 * _UI_SCALE, 0))
 
+    ttk.Label(frame, text="Copies:").grid(row=3, column=0, sticky="w")
+    copies_var = tk.StringVar(value="1")
+    copies_combo = ttk.Combobox(
+        frame,
+        textvariable=copies_var,
+        values=[str(n) for n in range(1, 11)],
+        state="readonly",
+        width=10,
+    )
+    copies_combo.grid(row=3, column=1, sticky="w")
+
     def current_layout() -> LabelLayout:
         return LabelLayout(align=align_var.get())
 
+    def current_copies() -> int:
+        try:
+            return max(1, min(10, int(copies_var.get())))
+        except ValueError:
+            return 1
+
     preview_frame = ttk.LabelFrame(frame, text="Preview", padding=6 * _UI_SCALE)
     preview_frame.grid(
-        row=3, column=0, columnspan=2, sticky="w", pady=(pad, 0)
+        row=4, column=0, columnspan=2, sticky="w", pady=(pad, 0)
     )
     preview_frame.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
     preview_label = ttk.Label(
@@ -452,7 +514,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         style="Status.TLabel",
     )
     status_label.grid(
-        row=4, column=0, columnspan=2, sticky="nw", pady=(2 * _UI_SCALE, 0)
+        row=5, column=0, columnspan=2, sticky="nw", pady=(2 * _UI_SCALE, 0)
     )
 
     def set_printing(enabled: bool) -> None:
@@ -472,7 +534,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             title_entry.focus_force()
             return
 
-        zpl = _build_zpl(title, serial, current_layout())
+        zpl = _build_zpl(title, serial, current_layout(), copies=current_copies())
 
         set_printing(False)
         status_var.set(_status_line("Sending to printer..."))
@@ -518,7 +580,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         root.destroy()
 
     buttons = ttk.Frame(frame)
-    buttons.grid(row=5, column=0, columnspan=2, sticky="w", pady=(_BUTTON_GAP, 0))
+    buttons.grid(row=6, column=0, columnspan=2, sticky="w", pady=(_BUTTON_GAP, 0))
     print_button = ttk.Button(buttons, text="Print", command=on_print)
     print_button.pack(side=tk.LEFT)
     cancel_button = ttk.Button(buttons, text="Cancel", command=on_cancel)
