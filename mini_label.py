@@ -531,15 +531,18 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     root.bind("<Escape>", lambda _event: on_cancel())
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
-    def focus_serial_entry():
+    def focus_initial_entry():
         root.lift()
         root.attributes("-topmost", True)
-        serial_entry.focus_force()
+        if default_title.strip():
+            serial_entry.focus_force()
+        else:
+            title_entry.focus_force()
 
     _center_window(root)
     schedule_preview()
-    root.after(0, focus_serial_entry)
-    root.after(100, focus_serial_entry)
+    root.after(0, focus_initial_entry)
+    root.after(100, focus_initial_entry)
     root.mainloop()
 
 
