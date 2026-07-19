@@ -9,6 +9,7 @@ import tkinter as tk
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -86,6 +87,9 @@ _GAP_TITLE_BARCODE = 10
 _TITLE_Y = _MARGIN
 _BARCODE_Y = _MARGIN + _TITLE_FONT_H + _GAP_TITLE_BARCODE
 _TEXT_ONLY_MAX_LINES = 8
+_AUTHOR = "Anton"
+_STAMP_FONT_H = 18
+_STAMP_FONT_W = 14
 
 _H_ALIGN = {"left": "L", "center": "C", "right": "R"}
 
@@ -160,9 +164,22 @@ def _barcode_x(serial: str, h_align: str) -> int:
     return _MARGIN + max(0, (block_w - width) // 2)
 
 
+def _signature_zpl() -> str:
+    stamp_y = _LABEL_HEIGHT - _MARGIN - _STAMP_FONT_H
+    text = f"{_AUTHOR} · {date.today():%Y-%m-%d}"
+    block_w = _LABEL_WIDTH - 2 * _MARGIN
+    return (
+        f"^FO{_MARGIN},{stamp_y}"
+        f"^FB{block_w},1,0,R,0"
+        f"^A0N,{_STAMP_FONT_H},{_STAMP_FONT_W}"
+        f"^FD{_zpl_field(text)}^FS"
+    )
+
+
 def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> str:
     layout = layout or LabelLayout()
     header = _zpl_header()
+    signature = _signature_zpl()
 
     if serial.strip():
         title_line = " ".join(title.split())
@@ -172,6 +189,7 @@ def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> st
                 _TITLE_Y, title_line, _TITLE_FONT_H, _TITLE_FONT_W, layout.align
             )
             + _barcode_zpl(serial, layout.align)
+            + signature
             + "^XZ"
         )
 
@@ -185,6 +203,7 @@ def _build_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> st
             layout.align,
             max_lines=_TEXT_ONLY_MAX_LINES,
         )
+        + signature
         + "^XZ"
     )
 
