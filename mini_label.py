@@ -79,13 +79,8 @@ _LABELARY_DPMM = 8
 _LABELARY_WIDTH_IN = 4
 _LABELARY_HEIGHT_IN = 2
 _MARGIN = 50
-_TITLE_FONT_H = 50
-_TITLE_FONT_W = 50
-_BARCODE_HEIGHT = 120
-_BARCODE_MODULE = 3
 _GAP_TITLE_BARCODE = 10
-_TITLE_Y = _MARGIN
-_BARCODE_Y = _MARGIN + _TITLE_FONT_H + _GAP_TITLE_BARCODE
+_GAP_BARCODE_CAPTION = 8
 _TEXT_ONLY_MAX_LINES = 8
 _AUTHOR = "Anton"
 _STAMP_FONT_H = 18
@@ -101,6 +96,26 @@ _NARROW_CHARS = set("iltrfjI.:;,!|'\"`")
 _WIDE_CHARS = set("mw@%")  # lowercase / symbols; A–Z use upper weight (incl. M, W)
 
 _H_ALIGN = {"left": "L", "center": "C", "right": "R"}
+_SIZE_STEPS = ("small", "medium", "large")
+_SIZE_LABELS = {"small": "Small", "medium": "Medium", "large": "Large"}
+# Title / note body font height & width (dots).
+_TEXT_SIZE = {
+    "small": (36, 36),
+    "medium": (50, 50),
+    "large": (70, 70),
+}
+# Barcode bar height and module width (dots).
+_BARCODE_SIZE = {
+    "small": (80, 2),
+    "medium": (120, 3),
+    "large": (160, 3),
+}
+# Human-readable caption under the barcode (dots).
+_CAPTION_SIZE = {
+    "small": (18, 14),
+    "medium": (28, 22),
+    "large": (40, 32),
+}
 
 
 def _label_dots(width_in: float, height_in: float, dpmm: int) -> tuple[int, int]:
@@ -113,13 +128,44 @@ _LABEL_WIDTH, _LABEL_HEIGHT = _label_dots(
 )
 
 
+def _normalize_size(value: str) -> str:
+    key = str(value).strip().lower()
+    if key not in _SIZE_STEPS:
+        raise ValueError(f"size must be one of {list(_SIZE_STEPS)}")
+    return key
+
+
+def _bump_size(current: str, delta: int) -> str:
+    idx = _SIZE_STEPS.index(_normalize_size(current))
+    return _SIZE_STEPS[max(0, min(len(_SIZE_STEPS) - 1, idx + delta))]
+
+
 @dataclass(frozen=True)
 class LabelLayout:
     align: str = "left"
+    title_size: str = "medium"
+    barcode_size: str = "medium"
+    caption_size: str = "medium"
 
     def __post_init__(self) -> None:
         if self.align not in _H_ALIGN:
             raise ValueError(f"align must be one of {list(_H_ALIGN)}")
+        object.__setattr__(self, "title_size", _normalize_size(self.title_size))
+        object.__setattr__(self, "barcode_size", _normalize_size(self.barcode_size))
+        object.__setattr__(self, "caption_size", _normalize_size(self.caption_size))
+
+    @property
+    def title_font(self) -> tuple[int, int]:
+        return _TEXT_SIZE[self.title_size]
+
+    @property
+    def caption_font(self) -> tuple[int, int]:
+        return _CAPTION_SIZE[self.caption_size]
+
+    @property
+    def barcode_metrics(self) -> tuple[int, int]:
+        """Return (bar_height, module_width)."""
+        return _BARCODE_SIZE[self.barcode_size]
 
 
 def _text_zpl(
@@ -155,7 +201,7 @@ def _text_width_dots(text: str, font_h: int) -> float:
     return sum(_char_width_dots(ch, font_h) for ch in text)
 
 
-def _truncate_to_printable_width(text: str, font_h: int = _TITLE_FONT_H) -> str:
+def _truncate_to_printable_width(text: str, font_h: int) -> str:
     """Fit one line using weighted glyph widths vs printable label width."""
     block_w = float(_LABEL_WIDTH - 2 * _MARGIN)
     if _text_width_dots(text, font_h) <= block_w:
@@ -185,29 +231,35 @@ def _zpl_header() -> str:
     )
 
 
-def _barcode_zpl(serial: str, h_align: str) -> str:
-    payload = _decode_barcode_input(serial)
-    barcode_x = _barcode_x(payload, h_align)
-    encoded = _zpl_fh_payload(payload)
-    return (
-        f"^FO{barcode_x},{_BARCODE_Y}^BY{_BARCODE_MODULE},3,{_BARCODE_HEIGHT}"
-        f"^FH^BCN,{_BARCODE_HEIGHT},Y,N,N^FD{encoded}^FS"
-    )
+def _caption_display(serial: str) -> str:
+    """Human-readable caption: keep typed text (act/part numbers, letters, escapes)."""
+    return " ".join(serial.split())
 
 
-def _estimate_barcode_width(serial: str) -> int:
+def _estimate_barcode_width(serial: str, module: int) -> int:
     modules = (len(serial) + 3) * 11
-    return modules * _BARCODE_MODULE
+    return modules * module
 
 
-def _barcode_x(serial: str, h_align: str) -> int:
-    width = _estimate_barcode_width(serial)
+def _barcode_x(serial: str, h_align: str, module: int) -> int:
+    width = _estimate_barcode_width(serial, module)
     block_w = _LABEL_WIDTH - 2 * _MARGIN
     if h_align == "left":
         return _MARGIN
     if h_align == "right":
         return max(_MARGIN, _LABEL_WIDTH - _MARGIN - width)
     return _MARGIN + max(0, (block_w - width) // 2)
+
+
+def _barcode_zpl(serial: str, h_align: str, *, y: int, height: int, module: int) -> str:
+    payload = _decode_barcode_input(serial)
+    barcode_x = _barcode_x(payload, h_align, module)
+    encoded = _zpl_fh_payload(payload)
+    # N = no built-in interpretation line; caption is drawn separately for sizing.
+    return (
+        f"^FO{barcode_x},{y}^BY{module},3,{height}"
+        f"^FH^BCN,{height},N,N,N^FD{encoded}^FS"
+    )
 
 
 def _signature_zpl() -> str:
@@ -222,6 +274,16 @@ def _signature_zpl() -> str:
     )
 
 
+def _content_bottom_y() -> int:
+    """Y just above the signature stamp."""
+    return _LABEL_HEIGHT - _MARGIN - _STAMP_FONT_H - 6
+
+
+def _note_max_lines(font_h: int) -> int:
+    available = max(font_h, _content_bottom_y() - _MARGIN)
+    return max(1, min(_TEXT_ONLY_MAX_LINES, available // font_h))
+
+
 def _build_zpl(
     title: str,
     serial: str,
@@ -234,29 +296,56 @@ def _build_zpl(
     signature = _signature_zpl()
     quantity = max(1, min(10, int(copies)))
     pq = f"^PQ{quantity}"
+    title_h, title_w = layout.title_font
 
     if serial.strip():
-        title_line = _truncate_to_printable_width(" ".join(title.split()))
-        return (
-            header
-            + _text_zpl(
-                _TITLE_Y, title_line, _TITLE_FONT_H, _TITLE_FONT_W, layout.align
+        title_line = ""
+        parts = [header]
+        y = _MARGIN
+        if title.strip():
+            title_line = _truncate_to_printable_width(
+                " ".join(title.split()), title_h
             )
-            + _barcode_zpl(serial, layout.align)
-            + signature
-            + pq
-            + "^XZ"
+            parts.append(
+                _text_zpl(y, title_line, title_h, title_w, layout.align)
+            )
+            y += title_h + _GAP_TITLE_BARCODE
+
+        bar_h, module = layout.barcode_metrics
+        caption_h, caption_w = layout.caption_font
+        caption_text = _truncate_to_printable_width(
+            _caption_display(serial), caption_h
         )
+        # Keep barcode + caption above the stamp when sizes are large.
+        bottom = _content_bottom_y()
+        needed = bar_h + _GAP_BARCODE_CAPTION + caption_h
+        if y + needed > bottom:
+            overflow = y + needed - bottom
+            bar_h = max(40, bar_h - overflow)
+
+        parts.append(
+            _barcode_zpl(
+                serial, layout.align, y=y, height=bar_h, module=module
+            )
+        )
+        caption_y = y + bar_h + _GAP_BARCODE_CAPTION
+        parts.append(
+            _text_zpl(
+                caption_y, caption_text, caption_h, caption_w, layout.align
+            )
+        )
+        parts.extend([signature, pq, "^XZ"])
+        return "".join(parts)
 
     return (
         header
         + _text_zpl(
             _MARGIN,
             title,
-            _TITLE_FONT_H,
-            _TITLE_FONT_W,
+            title_h,
+            title_w,
             layout.align,
-            max_lines=_TEXT_ONLY_MAX_LINES,
+            max_lines=_note_max_lines(title_h),
         )
         + signature
         + pq
@@ -389,7 +478,59 @@ def _parse_args():
         default="left",
         help="Horizontal alignment for title and barcode",
     )
+    parser.add_argument(
+        "--title-size",
+        choices=_SIZE_STEPS,
+        default="medium",
+        help="Title / note text size",
+    )
+    parser.add_argument(
+        "--barcode-size",
+        choices=_SIZE_STEPS,
+        default="medium",
+        help="Barcode bar height / module size",
+    )
+    parser.add_argument(
+        "--caption-size",
+        choices=_SIZE_STEPS,
+        default="medium",
+        help="Caption text size under the barcode",
+    )
     return parser.parse_args()
+
+
+def _add_size_stepper(
+    parent: ttk.Frame,
+    *,
+    row: int,
+    label: str,
+    size_var: tk.StringVar,
+    on_change,
+) -> tuple[ttk.Frame, ttk.Label]:
+    """Label + (−) size (+) row; size_var holds small|medium|large."""
+    display_var = tk.StringVar(value=_SIZE_LABELS[_normalize_size(size_var.get())])
+
+    def refresh_display(*_args: object) -> None:
+        display_var.set(_SIZE_LABELS[_normalize_size(size_var.get())])
+
+    size_var.trace_add("write", refresh_display)
+
+    name_label = ttk.Label(parent, text=label)
+    name_label.grid(row=row, column=0, sticky="w", pady=(6 * _UI_SCALE, 0))
+    stepper = ttk.Frame(parent)
+    stepper.grid(row=row, column=1, sticky="w", pady=(6 * _UI_SCALE, 0))
+
+    def bump(delta: int) -> None:
+        size_var.set(_bump_size(size_var.get(), delta))
+        on_change()
+
+    minus = ttk.Button(stepper, text="−", width=3, command=lambda: bump(-1))
+    minus.pack(side=tk.LEFT)
+    value = ttk.Label(stepper, textvariable=display_var, width=8, anchor="center")
+    value.pack(side=tk.LEFT, padx=(4, 4))
+    plus = ttk.Button(stepper, text="+", width=3, command=lambda: bump(1))
+    plus.pack(side=tk.LEFT)
+    return stepper, name_label
 
 
 def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None):
@@ -406,7 +547,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     frame = ttk.Frame(root, padding=pad)
     frame.grid(row=0, column=0)
     preview_row_height = (24 * _UI_SCALE) + (6 * _UI_SCALE) * 2 + _PREVIEW_MAX_HEIGHT
-    frame.grid_rowconfigure(4, minsize=preview_row_height)
+    preview_row = 7
+    frame.grid_rowconfigure(preview_row, minsize=preview_row_height)
 
     ttk.Label(frame, text="Title:").grid(
         row=0, column=0, sticky="w", pady=(0, 6 * _UI_SCALE)
@@ -431,7 +573,36 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     )
     align_combo.grid(row=2, column=1, sticky="w", pady=(6 * _UI_SCALE, 0))
 
-    ttk.Label(frame, text="Copies:").grid(row=3, column=0, sticky="w")
+    title_size_var = tk.StringVar(value=layout.title_size)
+    barcode_size_var = tk.StringVar(value=layout.barcode_size)
+    caption_size_var = tk.StringVar(value=layout.caption_size)
+
+    def schedule_preview_proxy(*_args: object) -> None:
+        schedule_preview()
+
+    _title_stepper, title_size_label = _add_size_stepper(
+        frame,
+        row=3,
+        label="Title size:",
+        size_var=title_size_var,
+        on_change=schedule_preview_proxy,
+    )
+    barcode_stepper, _barcode_size_label = _add_size_stepper(
+        frame,
+        row=4,
+        label="Barcode size:",
+        size_var=barcode_size_var,
+        on_change=schedule_preview_proxy,
+    )
+    caption_stepper, _caption_size_label = _add_size_stepper(
+        frame,
+        row=5,
+        label="Caption size:",
+        size_var=caption_size_var,
+        on_change=schedule_preview_proxy,
+    )
+
+    ttk.Label(frame, text="Copies:").grid(row=6, column=0, sticky="w", pady=(6 * _UI_SCALE, 0))
     copies_var = tk.StringVar(value="1")
     copies_combo = ttk.Combobox(
         frame,
@@ -440,10 +611,15 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         state="readonly",
         width=10,
     )
-    copies_combo.grid(row=3, column=1, sticky="w")
+    copies_combo.grid(row=6, column=1, sticky="w", pady=(6 * _UI_SCALE, 0))
 
     def current_layout() -> LabelLayout:
-        return LabelLayout(align=align_var.get())
+        return LabelLayout(
+            align=align_var.get(),
+            title_size=title_size_var.get(),
+            barcode_size=barcode_size_var.get(),
+            caption_size=caption_size_var.get(),
+        )
 
     def current_copies() -> int:
         try:
@@ -451,9 +627,22 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         except ValueError:
             return 1
 
+    def update_size_controls_for_mode(*_args: object) -> None:
+        """No barcode → note mode: title size scales the note; barcode/caption off."""
+        has_barcode = bool(serial_var.get().strip())
+        title_size_label.configure(
+            text="Title size:" if has_barcode else "Note size:"
+        )
+        state = ["!disabled"] if has_barcode else ["disabled"]
+        for child in (*barcode_stepper.winfo_children(), *caption_stepper.winfo_children()):
+            try:
+                child.state(state)
+            except tk.TclError:
+                pass
+
     preview_frame = ttk.LabelFrame(frame, text="Preview", padding=6 * _UI_SCALE)
     preview_frame.grid(
-        row=4, column=0, columnspan=2, sticky="w", pady=(pad, 0)
+        row=preview_row, column=0, columnspan=2, sticky="w", pady=(pad, 0)
     )
     preview_frame.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
     preview_label = ttk.Label(
@@ -502,8 +691,13 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     title_var.trace_add("write", schedule_preview)
     serial_var.trace_add("write", schedule_preview)
+    serial_var.trace_add("write", update_size_controls_for_mode)
     align_var.trace_add("write", schedule_preview)
     align_combo.bind("<<ComboboxSelected>>", schedule_preview)
+    title_size_var.trace_add("write", schedule_preview)
+    barcode_size_var.trace_add("write", schedule_preview)
+    caption_size_var.trace_add("write", schedule_preview)
+    update_size_controls_for_mode()
 
     status_var = tk.StringVar(value="")
     status_style = ttk.Style()
@@ -514,7 +708,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         style="Status.TLabel",
     )
     status_label.grid(
-        row=5, column=0, columnspan=2, sticky="nw", pady=(2 * _UI_SCALE, 0)
+        row=8, column=0, columnspan=2, sticky="nw", pady=(2 * _UI_SCALE, 0)
     )
 
     def set_printing(enabled: bool) -> None:
@@ -580,7 +774,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         root.destroy()
 
     buttons = ttk.Frame(frame)
-    buttons.grid(row=6, column=0, columnspan=2, sticky="w", pady=(_BUTTON_GAP, 0))
+    buttons.grid(row=9, column=0, columnspan=2, sticky="w", pady=(_BUTTON_GAP, 0))
     print_button = ttk.Button(buttons, text="Print", command=on_print)
     print_button.pack(side=tk.LEFT)
     cancel_button = ttk.Button(buttons, text="Cancel", command=on_cancel)
@@ -614,4 +808,12 @@ def print_label(default_title: str = "", layout: LabelLayout | None = None):
 
 if __name__ == "__main__":
     args = _parse_args()
-    print_label(args.title, LabelLayout(align=args.align))
+    print_label(
+        args.title,
+        LabelLayout(
+            align=args.align,
+            title_size=args.title_size,
+            barcode_size=args.barcode_size,
+            caption_size=args.caption_size,
+        ),
+    )
