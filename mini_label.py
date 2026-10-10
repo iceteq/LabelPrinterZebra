@@ -272,6 +272,12 @@ def _text_width_dots(text: str, font_h: int) -> float:
     return sum(_char_width_dots(ch, font_h) for ch in text)
 
 
+_MIN_TITLE_H = 18
+_MIN_CAPTION_H = 14
+_MIN_NOTE_H = 20
+_MIN_BAR_H = 48
+
+
 def _truncate_to_width(text: str, font_h: int, block_w: float) -> str:
     if _text_width_dots(text, font_h) <= block_w:
         return text
@@ -289,6 +295,96 @@ def _truncate_to_width(text: str, font_h: int, block_w: float) -> str:
         kept.append(ch)
         used += w
     return "".join(kept) + ellipsis
+
+
+@dataclass(frozen=True)
+class FittedText:
+    text: str
+    font_h: int
+    font_w: int
+    shrunk: bool
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class BuildResult:
+    zpl: str
+    warnings: tuple[str, ...] = ()
+
+
+def _scale_font_w(prefer_h: int, prefer_w: int, new_h: int) -> int:
+    if prefer_h <= 0:
+        return max(8, new_h)
+    return max(8, int(round(prefer_w * (new_h / prefer_h))))
+
+
+def _fit_text_to_width(
+    text: str,
+    prefer_h: int,
+    prefer_w: int,
+    block_w: float,
+    min_h: int,
+) -> FittedText:
+    """Shrink font to fit one line; truncate with ellipsis only at the minimum size."""
+    text = text or ""
+    if not text:
+        return FittedText("", prefer_h, prefer_w, False, False)
+    h = prefer_h
+    w = prefer_w
+    while h > min_h and _text_width_dots(text, h) > block_w:
+        h -= 2
+        w = _scale_font_w(prefer_h, prefer_w, h)
+    shrunk = h < prefer_h
+    if _text_width_dots(text, h) <= block_w:
+        return FittedText(text, h, w, shrunk, False)
+    clipped = _truncate_to_width(text, h, block_w)
+    return FittedText(clipped, h, w, shrunk, clipped != text)
+
+
+def _estimate_wrapped_lines(text: str, font_h: int, block_w: float) -> int:
+    words = text.split()
+    if not words:
+        return 1
+    lines = 1
+    used = 0.0
+    space = _char_width_dots(" ", font_h)
+    for word in words:
+        ww = _text_width_dots(word, font_h)
+        if ww > block_w:
+            # Very long token: rough char-wrap estimate.
+            lines += max(1, int(ww // max(1.0, block_w)))
+            used = ww % max(1.0, block_w)
+            continue
+        if used == 0:
+            used = ww
+        elif used + space + ww <= block_w:
+            used += space + ww
+        else:
+            lines += 1
+            used = ww
+    return max(1, lines)
+
+
+def _fit_note_text(
+    text: str,
+    prefer_h: int,
+    prefer_w: int,
+    block_w: float,
+    max_lines: int,
+    min_h: int = _MIN_NOTE_H,
+) -> FittedText:
+    """Shrink note body until it wraps within max_lines; last resort keeps min size."""
+    text = " ".join(text.split())
+    if not text:
+        return FittedText("", prefer_h, prefer_w, False, False)
+    h = prefer_h
+    w = prefer_w
+    while h > min_h and _estimate_wrapped_lines(text, h, block_w) > max_lines:
+        h -= 2
+        w = _scale_font_w(prefer_h, prefer_w, h)
+    shrunk = h < prefer_h
+    # At minimum size, still allow wrapping; FB will clip overflow lines.
+    return FittedText(text, h, w, shrunk, False)
 
 
 def _zpl_header() -> str:
@@ -321,6 +417,14 @@ def _fit_module(payload: str, prefer: int, max_width: int, fill: float) -> int:
     while module < max_fit and _estimate_barcode_width(payload, module) < target:
         module += 1
     return module
+
+
+def _barcode_warnings(module: int, prefer: int) -> list[str]:
+    if module <= 1:
+        return ["Barcode is very dense — may be hard to scan"]
+    if module < prefer:
+        return ["Barcode narrowed to fit the label"]
+    return []
 
 
 def _text_zpl(
@@ -374,29 +478,53 @@ def _content_bottom(margin: int) -> int:
     return _LABEL_HEIGHT - margin - _stamp_reserve()
 
 
-def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> str:
-    font_h, font_w = _NOTE_SIZE[layout.note_size]
-    margin = _adaptive_margin(font_h >= 50)
+def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildResult:
+    prefer_h, prefer_w = _NOTE_SIZE[layout.note_size]
+    margin = _adaptive_margin(prefer_h >= 50)
     bottom = _content_bottom(margin)
-    available = max(font_h, bottom - margin)
-    max_lines = max(1, min(_TEXT_ONLY_MAX_LINES, available // max(1, font_h + 4)))
-    # Optical middle for short notes; top for long wraps.
-    est_lines = min(max_lines, max(1, (len(title) // 28) + 1))
-    block_h = est_lines * font_h
+    block_w = _LABEL_WIDTH - 2 * margin
+    available = max(prefer_h, bottom - margin)
+    # Provisional line budget at preferred size, then refit after shrink.
+    max_lines = max(1, min(_TEXT_ONLY_MAX_LINES, available // max(1, prefer_h + 4)))
+    fitted = _fit_note_text(title, prefer_h, prefer_w, float(block_w), max_lines)
+    max_lines = max(
+        1, min(_TEXT_ONLY_MAX_LINES, available // max(1, fitted.font_h + 4))
+    )
+    # If shrink unlocked more lines, try once more at the fitted size.
+    fitted = _fit_note_text(
+        title, prefer_h, prefer_w, float(block_w), max_lines
+    )
+    est_lines = min(
+        max_lines,
+        _estimate_wrapped_lines(fitted.text, fitted.font_h, float(block_w)),
+    )
+    block_h = est_lines * fitted.font_h
     if est_lines <= 2:
         y = margin + max(0, (bottom - margin - block_h) // 2)
         align = "center"
     else:
         y = margin
         align = "left"
-    block_w = _LABEL_WIDTH - 2 * margin
-    return (
+    warnings: list[str] = []
+    if fitted.shrunk:
+        warnings.append("Note text shrunk to fit")
+    zpl = (
         _zpl_header()
-        + _text_zpl(margin, y, title, font_h, font_w, align, block_w, max_lines=max_lines)
+        + _text_zpl(
+            margin,
+            y,
+            fitted.text,
+            fitted.font_h,
+            fitted.font_w,
+            align,
+            block_w,
+            max_lines=max_lines,
+        )
         + _signature_zpl(margin)
         + f"^PQ{copies}"
         + "^XZ"
     )
+    return BuildResult(zpl, tuple(warnings))
 
 
 def _build_side_zpl(
@@ -405,44 +533,84 @@ def _build_side_zpl(
     recipe: LookRecipe,
     *,
     copies: int,
-) -> str:
+) -> BuildResult:
     payload = _decode_barcode_input(serial)
     margin = 40
     gap = 10
+    warnings: list[str] = []
+    raw_title = " ".join(title.split()) if title.strip() else ""
     title_h, title_w = recipe.title_h, recipe.title_w
-    title_line = " ".join(title.split()) if title.strip() else ""
-    # Title column hugs the text — keeps title + bars as one Gestalt group.
-    title_col = max(
-        72,
-        min(140, int(_text_width_dots(title_line or "M", title_h) + 12)),
-    )
-    bar_area_x = margin + (title_col + gap if title_line else 0)
+    title_col = 100
+    fitted_title = FittedText("", title_h, title_w, False, False)
+    if raw_title:
+        # Iterate: column hugs text, font shrinks to column, column remeasures.
+        for _ in range(4):
+            title_col = max(
+                72,
+                min(160, int(_text_width_dots(raw_title, title_h) + 12)),
+            )
+            fitted_title = _fit_text_to_width(
+                raw_title, recipe.title_h, recipe.title_w, float(title_col), _MIN_TITLE_H
+            )
+            title_h, title_w = fitted_title.font_h, fitted_title.font_w
+            new_col = max(
+                72,
+                min(160, int(_text_width_dots(fitted_title.text, title_h) + 12)),
+            )
+            if abs(new_col - title_col) <= 2:
+                title_col = new_col
+                break
+            title_col = new_col
+        if fitted_title.shrunk:
+            warnings.append("Title shrunk to fit")
+        if fitted_title.truncated:
+            warnings.append("Title shortened to fit")
+
+    bar_area_x = margin + (title_col + gap if raw_title else 0)
     bar_max_w = _LABEL_WIDTH - bar_area_x - margin
     quiet = 12
     module = _fit_module(
         payload, recipe.module_pref, max(40, bar_max_w - quiet), recipe.bar_fill
     )
+    warnings.extend(_barcode_warnings(module, recipe.module_pref))
     bar_h = recipe.bar_h
-    caption_h, caption_w = recipe.caption_h, recipe.caption_w
-    gap_bc = max(5, int(caption_h * 0.12))
+    caption_pref_h, caption_pref_w = recipe.caption_h, recipe.caption_w
+    gap_bc = max(5, int(caption_pref_h * 0.12))
     bottom = _content_bottom(margin)
-    block_h = bar_h + gap_bc + caption_h
+    block_h = bar_h + gap_bc + caption_pref_h
     if margin + block_h > bottom:
-        bar_h = max(56, bar_h - (margin + block_h - bottom))
-        block_h = bar_h + gap_bc + caption_h
-    y0 = margin + max(0, (bottom - margin - block_h) // 2)
+        bar_h = max(_MIN_BAR_H, bar_h - (margin + block_h - bottom))
+    y0 = margin + max(0, (bottom - margin - (bar_h + gap_bc + caption_pref_h)) // 2)
+    # Recompute vertical center with fitted caption height after fit.
     bar_w = _estimate_barcode_width(payload, module)
     bar_x = bar_area_x
-    title_line = _truncate_to_width(title_line, title_h, float(title_col))
-    title_y = y0 + max(0, (bar_h - title_h) // 2)
-    caption = _truncate_to_width(
-        _caption_display(serial), caption_h, float(bar_max_w)
+    fitted_caption = _fit_text_to_width(
+        _caption_display(serial),
+        caption_pref_h,
+        caption_pref_w,
+        float(bar_max_w),
+        _MIN_CAPTION_H,
     )
+    if fitted_caption.shrunk:
+        warnings.append("Caption shrunk to fit")
+    if fitted_caption.truncated:
+        warnings.append("Caption shortened to fit")
+    gap_bc = max(5, int(fitted_caption.font_h * 0.12))
+    block_h = bar_h + gap_bc + fitted_caption.font_h
+    y0 = margin + max(0, (bottom - margin - block_h) // 2)
+    title_y = y0 + max(0, (bar_h - fitted_title.font_h) // 2)
+
     parts = [_zpl_header()]
-    if title_line:
+    if raw_title and fitted_title.text:
         parts.append(
             _text_zpl(
-                margin, title_y, title_line, title_h, title_w, "left", title_col
+                margin,
+                title_y,
+                fitted_title.text,
+                fitted_title.font_h,
+                fitted_title.font_w,
+                "left",
+                title_col,
             )
         )
     parts.append(_barcode_zpl(bar_x, y0, payload, bar_h, module))
@@ -450,9 +618,9 @@ def _build_side_zpl(
         _text_zpl(
             bar_x,
             y0 + bar_h + gap_bc,
-            caption,
-            caption_h,
-            caption_w,
+            fitted_caption.text,
+            fitted_caption.font_h,
+            fitted_caption.font_w,
             "left",
             max(bar_w, bar_max_w),
         )
@@ -460,7 +628,7 @@ def _build_side_zpl(
     parts.append(_signature_zpl(margin))
     parts.append(f"^PQ{copies}")
     parts.append("^XZ")
-    return "".join(parts)
+    return BuildResult("".join(parts), tuple(dict.fromkeys(warnings)))
 
 
 def _build_stack_zpl(
@@ -469,14 +637,12 @@ def _build_stack_zpl(
     recipe: LookRecipe,
     *,
     copies: int,
-) -> str:
+) -> BuildResult:
     payload = _decode_barcode_input(serial)
+    warnings: list[str] = []
     has_title = bool(title.strip())
-    title_h, title_w = (recipe.title_h, recipe.title_w) if has_title else (0, 0)
-    caption_h, caption_w = recipe.caption_h, recipe.caption_w
-    gap_tb = max(6, int(title_h * 0.18)) if has_title else 0
-    gap_bc = max(5, int(caption_h * 0.12))
-    dense = (title_h + recipe.bar_h + caption_h) > 220
+    caption_pref_h, caption_pref_w = recipe.caption_h, recipe.caption_w
+    dense = (recipe.title_h + recipe.bar_h + caption_pref_h) > 220
     margin = _adaptive_margin(dense)
     bottom = _content_bottom(margin)
     block_w = _LABEL_WIDTH - 2 * margin
@@ -484,25 +650,60 @@ def _build_stack_zpl(
     module = _fit_module(
         payload, recipe.module_pref, block_w - quiet, recipe.bar_fill
     )
+    warnings.extend(_barcode_warnings(module, recipe.module_pref))
+
+    fitted_title = FittedText("", 0, 0, False, False)
+    if has_title:
+        fitted_title = _fit_text_to_width(
+            " ".join(title.split()),
+            recipe.title_h,
+            recipe.title_w,
+            float(block_w),
+            _MIN_TITLE_H,
+        )
+        if fitted_title.shrunk:
+            warnings.append("Title shrunk to fit")
+        if fitted_title.truncated:
+            warnings.append("Title shortened to fit")
+
+    fitted_caption = _fit_text_to_width(
+        _caption_display(serial),
+        caption_pref_h,
+        caption_pref_w,
+        float(block_w),
+        _MIN_CAPTION_H,
+    )
+    if fitted_caption.shrunk:
+        warnings.append("Caption shrunk to fit")
+    if fitted_caption.truncated:
+        warnings.append("Caption shortened to fit")
+
+    title_h = fitted_title.font_h if has_title else 0
+    gap_tb = max(6, int(title_h * 0.18)) if has_title else 0
+    gap_bc = max(5, int(fitted_caption.font_h * 0.12))
     bar_h = recipe.bar_h
-    block_h = title_h + gap_tb + bar_h + gap_bc + caption_h
+    block_h = title_h + gap_tb + bar_h + gap_bc + fitted_caption.font_h
     if margin + block_h > bottom:
         overflow = margin + block_h - bottom
-        bar_h = max(56, bar_h - overflow)
-        block_h = title_h + gap_tb + bar_h + gap_bc + caption_h
+        bar_h = max(_MIN_BAR_H, bar_h - overflow)
+        block_h = title_h + gap_tb + bar_h + gap_bc + fitted_caption.font_h
     if recipe.valign == "middle":
         y = margin + max(0, (bottom - margin - block_h) // 2)
     else:
-        # Slight top bias, not glued to the edge — calmer than margin alone.
         y = margin + 4
     align = recipe.align
     parts = [_zpl_header()]
     if has_title:
-        title_line = _truncate_to_width(
-            " ".join(title.split()), title_h, float(block_w)
-        )
         parts.append(
-            _text_zpl(margin, y, title_line, title_h, title_w, align, block_w)
+            _text_zpl(
+                margin,
+                y,
+                fitted_title.text,
+                fitted_title.font_h,
+                fitted_title.font_w,
+                align,
+                block_w,
+            )
         )
         y += title_h + gap_tb
     bar_w = _estimate_barcode_width(payload, module)
@@ -514,14 +715,38 @@ def _build_stack_zpl(
         bar_x = margin + max(0, (block_w - bar_w) // 2)
     parts.append(_barcode_zpl(bar_x, y, payload, bar_h, module))
     y += bar_h + gap_bc
-    caption = _truncate_to_width(_caption_display(serial), caption_h, float(block_w))
     parts.append(
-        _text_zpl(margin, y, caption, caption_h, caption_w, align, block_w)
+        _text_zpl(
+            margin,
+            y,
+            fitted_caption.text,
+            fitted_caption.font_h,
+            fitted_caption.font_w,
+            align,
+            block_w,
+        )
     )
     parts.append(_signature_zpl(margin))
     parts.append(f"^PQ{copies}")
     parts.append("^XZ")
-    return "".join(parts)
+    return BuildResult("".join(parts), tuple(dict.fromkeys(warnings)))
+
+
+def _compose_label(
+    title: str,
+    serial: str,
+    layout: LabelLayout | None = None,
+    *,
+    copies: int = 1,
+) -> BuildResult:
+    layout = layout or LabelLayout()
+    quantity = max(1, min(10, int(copies)))
+    if not serial.strip():
+        return _build_note_zpl(title, layout, copies=quantity)
+    recipe = layout.recipe
+    if recipe.stack == "side":
+        return _build_side_zpl(title, serial.strip(), recipe, copies=quantity)
+    return _build_stack_zpl(title, serial.strip(), recipe, copies=quantity)
 
 
 def _build_zpl(
@@ -531,14 +756,7 @@ def _build_zpl(
     *,
     copies: int = 1,
 ) -> str:
-    layout = layout or LabelLayout()
-    quantity = max(1, min(10, int(copies)))
-    if not serial.strip():
-        return _build_note_zpl(title, layout, copies=quantity)
-    recipe = layout.recipe
-    if recipe.stack == "side":
-        return _build_side_zpl(title, serial.strip(), recipe, copies=quantity)
-    return _build_stack_zpl(title, serial.strip(), recipe, copies=quantity)
+    return _compose_label(title, serial, layout, copies=copies).zpl
 
 
 _UI_SCALE = 2
@@ -592,8 +810,10 @@ def _png_to_photo(png_data: bytes, max_width: int = _PREVIEW_MAX_WIDTH) -> tk.Ph
     return photo
 
 
-def _preview_zpl(title: str, serial: str, layout: LabelLayout | None = None) -> str:
-    return _build_zpl(title.strip(), serial.strip(), layout)
+def _preview_label(
+    title: str, serial: str, layout: LabelLayout | None = None
+) -> BuildResult:
+    return _compose_label(title.strip(), serial.strip(), layout)
 
 
 def _send_zpl(zpl: str) -> tuple[str, int]:
@@ -733,6 +953,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     try:
         style.configure("Hint.TLabel", foreground="#666666")
         style.configure("Status.TLabel", font=("Segoe UI", 8), foreground="#B00020")
+        style.configure("Warn.TLabel", font=("Segoe UI", 8), foreground="#8A6116")
         style.configure("Ok.TLabel", font=("Segoe UI", 8), foreground="#1B5E20")
     except tk.TclError:
         pass
@@ -837,21 +1058,35 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     preview_state = {"photo": None, "request_id": 0, "after_id": None, "closed": False}
 
-    def apply_preview(request_id: int, png_data: bytes | None, error: str | None) -> None:
+    def apply_preview(
+        request_id: int,
+        png_data: bytes | None,
+        error: str | None,
+        warnings: tuple[str, ...] = (),
+    ) -> None:
         if preview_state["closed"] or request_id != preview_state["request_id"]:
             return
         if png_data is None:
             preview_state["photo"] = None
             preview_label.configure(image="", text=error or "Preview unavailable")
+            status_label.configure(style="Status.TLabel")
+            status_var.set(_status_line(error or "Preview unavailable"))
             return
         photo = _png_to_photo(png_data)
         preview_state["photo"] = photo
         preview_label.configure(image=photo, text="")
+        if warnings:
+            status_label.configure(style="Warn.TLabel")
+            status_var.set(_status_line(" · ".join(warnings)))
+        else:
+            status_var.set("")
 
     def refresh_preview() -> None:
         request_id = preview_state["request_id"] + 1
         preview_state["request_id"] = request_id
-        zpl = _preview_zpl(title_var.get(), serial_var.get(), current_layout())
+        built = _preview_label(title_var.get(), serial_var.get(), current_layout())
+        zpl = built.zpl
+        warnings = built.warnings
 
         def fetch() -> None:
             try:
@@ -861,7 +1096,10 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
                 png_data = None
                 error = str(exc)
             if not preview_state["closed"]:
-                root.after(0, lambda: apply_preview(request_id, png_data, error))
+                root.after(
+                    0,
+                    lambda: apply_preview(request_id, png_data, error, warnings),
+                )
 
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -903,7 +1141,10 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             title_entry.focus_force()
             return
 
-        zpl = _build_zpl(title, serial, current_layout(), copies=current_copies())
+        built = _compose_label(
+            title, serial, current_layout(), copies=current_copies()
+        )
+        zpl = built.zpl
 
         set_printing(False)
         status_label.configure(style="Status.TLabel")
