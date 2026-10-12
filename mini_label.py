@@ -1482,9 +1482,9 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     def update_mode_chrome(*_args: object) -> None:
         has_barcode = bool(serial_var.get().strip())
         if has_barcode:
-            note_size_label.pack_forget()
-            note_stepper.pack_forget()
+            size_row.grid_remove()
         else:
+            size_row.grid()
             note_size_label.pack(side=tk.LEFT)
             note_stepper.pack(side=tk.LEFT, padx=(8, 0))
 
