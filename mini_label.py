@@ -18,17 +18,128 @@ _CONFIG_PATH = _CONFIG_DIR / "printer_config.json"
 _EXAMPLE_NAME = "printer_config.example.json"
 _BARCODE_ESCAPES_PATH = _CONFIG_DIR / "barcode_escapes.json"
 _BARCODE_ESCAPES_EXAMPLE = _CONFIG_DIR / "barcode_escapes.example.json"
+_DEFAULT_PRINTER_PORT = 9100
 
 
-def _load_printer_config():
+@dataclass(frozen=True)
+class PrinterEntry:
+    name: str
+    host: str
+    port: int = _DEFAULT_PRINTER_PORT
+
+
+@dataclass
+class PrinterStore:
+    printers: list[PrinterEntry]
+    selected: str = ""
+
+    def names(self) -> list[str]:
+        return [p.name for p in self.printers]
+
+    def get(self, name: str) -> PrinterEntry | None:
+        for printer in self.printers:
+            if printer.name == name:
+                return printer
+        return None
+
+    def selected_printer(self) -> PrinterEntry | None:
+        chosen = self.get(self.selected)
+        if chosen is not None:
+            return chosen
+        return self.printers[0] if self.printers else None
+
+
+def _empty_printer_store() -> PrinterStore:
+    return PrinterStore(printers=[], selected="")
+
+
+def _normalize_printer_store(data: object) -> PrinterStore:
+    """Accept new multi-printer config or legacy {host, port}."""
+    if not isinstance(data, dict):
+        return _empty_printer_store()
+
+    if "printers" not in data and "host" in data:
+        name = str(data.get("name") or "Printer").strip() or "Printer"
+        port = int(data.get("port", _DEFAULT_PRINTER_PORT))
+        entry = PrinterEntry(name=name, host=str(data["host"]).strip(), port=port)
+        return PrinterStore(printers=[entry], selected=entry.name)
+
+    printers: list[PrinterEntry] = []
+    seen: set[str] = set()
+    raw_list = data.get("printers", [])
+    if not isinstance(raw_list, list):
+        raw_list = []
+    for item in raw_list:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        host = str(item.get("host", "")).strip()
+        if not name or not host or name in seen:
+            continue
+        try:
+            port = int(item.get("port", _DEFAULT_PRINTER_PORT))
+        except (TypeError, ValueError):
+            port = _DEFAULT_PRINTER_PORT
+        if not (1 <= port <= 65535):
+            port = _DEFAULT_PRINTER_PORT
+        seen.add(name)
+        printers.append(PrinterEntry(name=name, host=host, port=port))
+
+    selected = str(data.get("selected", "")).strip()
+    names = {p.name for p in printers}
+    if selected not in names:
+        selected = printers[0].name if printers else ""
+    return PrinterStore(printers=printers, selected=selected)
+
+
+def _load_printer_store() -> PrinterStore:
     if not _CONFIG_PATH.is_file():
-        raise FileNotFoundError(
-            f"Missing {_CONFIG_PATH.name}. Copy {_EXAMPLE_NAME} to {_CONFIG_PATH.name} "
-            f"and set your printer's host and port. See README.md."
-        )
+        return _empty_printer_store()
     with open(_CONFIG_PATH, encoding="utf-8") as f:
-        data = json.load(f)
-    return str(data["host"]), int(data["port"])
+        return _normalize_printer_store(json.load(f))
+
+
+def _save_printer_store(store: PrinterStore) -> None:
+    payload = {
+        "selected": store.selected,
+        "printers": [
+            {"name": p.name, "host": p.host, "port": int(p.port)} for p in store.printers
+        ],
+    }
+    with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+
+
+def _load_printer_config() -> tuple[str, int]:
+    store = _load_printer_store()
+    printer = store.selected_printer()
+    if printer is None:
+        raise FileNotFoundError(
+            "No printer configured. Click Manage… to add a printer (name, IP, port)."
+        )
+    return printer.host, printer.port
+
+
+def _validate_printer_fields(
+    name: str, host: str, port_text: str, *, existing: set[str], renaming_from: str = ""
+) -> tuple[str, str, int]:
+    name = name.strip()
+    host = host.strip()
+    if not name:
+        raise ValueError("Enter a printer name.")
+    if not host:
+        raise ValueError("Enter a printer IP or hostname.")
+    try:
+        port = int(str(port_text).strip())
+    except ValueError as exc:
+        raise ValueError("Port must be a number (usually 9100).") from exc
+    if not (1 <= port <= 65535):
+        raise ValueError("Port must be between 1 and 65535.")
+    conflict = existing - ({renaming_from} if renaming_from else set())
+    if name in conflict:
+        raise ValueError(f'A printer named "{name}" already exists.')
+    return name, host, port
 
 
 def _zpl_field(text: str) -> str:
@@ -938,6 +1049,193 @@ def _look_id_from_title(title: str) -> str:
     return _DEFAULT_LOOK
 
 
+def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
+    """Modal dialog to add / edit / remove named printers in printer_config.json."""
+    store = _load_printer_store()
+    win = tk.Toplevel(parent)
+    win.title("Manage printers")
+    win.transient(parent)
+    win.resizable(False, False)
+    win.attributes("-topmost", True)
+    pad = 12 * _UI_SCALE
+    body = ttk.Frame(win, padding=pad)
+    body.grid(row=0, column=0)
+
+    ttk.Label(body, text="Saved printers (local only)").grid(
+        row=0, column=0, columnspan=2, sticky="w"
+    )
+    listbox = tk.Listbox(body, height=6, width=36, exportselection=False)
+    listbox.grid(row=1, column=0, columnspan=2, sticky="we", pady=(4, 8))
+
+    ttk.Label(body, text="Name").grid(row=2, column=0, sticky="w")
+    name_var = tk.StringVar()
+    name_entry = ttk.Entry(body, textvariable=name_var, width=28)
+    name_entry.grid(row=2, column=1, sticky="we", pady=2)
+
+    ttk.Label(body, text="IP / host").grid(row=3, column=0, sticky="w")
+    host_var = tk.StringVar()
+    host_entry = ttk.Entry(body, textvariable=host_var, width=28)
+    host_entry.grid(row=3, column=1, sticky="we", pady=2)
+
+    ttk.Label(body, text="Port").grid(row=4, column=0, sticky="w")
+    port_var = tk.StringVar(value=str(_DEFAULT_PRINTER_PORT))
+    port_entry = ttk.Entry(body, textvariable=port_var, width=10)
+    port_entry.grid(row=4, column=1, sticky="w", pady=2)
+
+    status_var = tk.StringVar(value="")
+    ttk.Label(body, textvariable=status_var, style="Hint.TLabel").grid(
+        row=5, column=0, columnspan=2, sticky="w", pady=(6, 0)
+    )
+
+    editing_name = {"value": ""}
+
+    def refresh_list(select_name: str | None = None) -> None:
+        listbox.delete(0, tk.END)
+        for printer in store.printers:
+            mark = " ★" if printer.name == store.selected else ""
+            listbox.insert(tk.END, f"{printer.name}  ({printer.host}:{printer.port}){mark}")
+        target = select_name or store.selected
+        if target:
+            for idx, printer in enumerate(store.printers):
+                if printer.name == target:
+                    listbox.selection_clear(0, tk.END)
+                    listbox.selection_set(idx)
+                    listbox.see(idx)
+                    break
+
+    def clear_fields() -> None:
+        editing_name["value"] = ""
+        name_var.set("")
+        host_var.set("")
+        port_var.set(str(_DEFAULT_PRINTER_PORT))
+        status_var.set("")
+        listbox.selection_clear(0, tk.END)
+
+    def load_selected(*_args: object) -> None:
+        selection = listbox.curselection()
+        if not selection:
+            return
+        printer = store.printers[selection[0]]
+        editing_name["value"] = printer.name
+        name_var.set(printer.name)
+        host_var.set(printer.host)
+        port_var.set(str(printer.port))
+        status_var.set("Editing — Save changes or Delete")
+
+    def persist() -> None:
+        _save_printer_store(store)
+        on_changed(store)
+
+    def on_new() -> None:
+        clear_fields()
+        status_var.set("Enter name, IP, and port — then Add")
+        name_entry.focus_force()
+
+    def on_add() -> None:
+        try:
+            name, host, port = _validate_printer_fields(
+                name_var.get(),
+                host_var.get(),
+                port_var.get(),
+                existing=set(store.names()),
+            )
+        except ValueError as exc:
+            messagebox.showwarning("Printer", str(exc), parent=win)
+            return
+        store.printers.append(PrinterEntry(name=name, host=host, port=port))
+        if not store.selected:
+            store.selected = name
+        persist()
+        refresh_list(name)
+        editing_name["value"] = name
+        status_var.set(f'Added "{name}"')
+
+    def on_save() -> None:
+        selection = listbox.curselection()
+        if not selection and not editing_name["value"]:
+            on_add()
+            return
+        old_name = editing_name["value"]
+        if not old_name and selection:
+            old_name = store.printers[selection[0]].name
+        if not old_name:
+            on_add()
+            return
+        try:
+            name, host, port = _validate_printer_fields(
+                name_var.get(),
+                host_var.get(),
+                port_var.get(),
+                existing=set(store.names()),
+                renaming_from=old_name,
+            )
+        except ValueError as exc:
+            messagebox.showwarning("Printer", str(exc), parent=win)
+            return
+        idx = next(i for i, p in enumerate(store.printers) if p.name == old_name)
+        store.printers[idx] = PrinterEntry(name=name, host=host, port=port)
+        if store.selected == old_name:
+            store.selected = name
+        editing_name["value"] = name
+        persist()
+        refresh_list(name)
+        status_var.set(f'Saved "{name}"')
+
+    def on_delete() -> None:
+        selection = listbox.curselection()
+        name = editing_name["value"]
+        if selection:
+            name = store.printers[selection[0]].name
+        if not name:
+            messagebox.showinfo("Printer", "Select a printer to delete.", parent=win)
+            return
+        if not messagebox.askyesno(
+            "Delete printer", f'Delete "{name}"?', parent=win
+        ):
+            return
+        store.printers = [p for p in store.printers if p.name != name]
+        if store.selected == name:
+            store.selected = store.printers[0].name if store.printers else ""
+        persist()
+        clear_fields()
+        refresh_list()
+        status_var.set(f'Deleted "{name}"')
+
+    def on_use() -> None:
+        selection = listbox.curselection()
+        if not selection:
+            messagebox.showinfo("Printer", "Select a printer to use.", parent=win)
+            return
+        store.selected = store.printers[selection[0]].name
+        persist()
+        refresh_list(store.selected)
+        status_var.set(f'Using "{store.selected}"')
+
+    def on_close() -> None:
+        win.destroy()
+
+    buttons = ttk.Frame(body)
+    buttons.grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
+    ttk.Button(buttons, text="New", command=on_new).pack(side=tk.LEFT)
+    ttk.Button(buttons, text="Add", command=on_add).pack(side=tk.LEFT, padx=(6, 0))
+    ttk.Button(buttons, text="Save", command=on_save).pack(side=tk.LEFT, padx=(6, 0))
+    ttk.Button(buttons, text="Delete", command=on_delete).pack(side=tk.LEFT, padx=(6, 0))
+    ttk.Button(buttons, text="Use selected", command=on_use).pack(
+        side=tk.LEFT, padx=(6, 0)
+    )
+    ttk.Button(buttons, text="Close", command=on_close).pack(side=tk.LEFT, padx=(12, 0))
+
+    listbox.bind("<<ListboxSelect>>", load_selected)
+    refresh_list()
+    if not store.printers:
+        status_var.set("No printers yet — fill the fields and click Add")
+        name_entry.focus_force()
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
+    win.grab_set()
+    parent.wait_window(win)
+
+
 def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None):
     layout = layout or LabelLayout()
     pad = 14 * _UI_SCALE
@@ -961,17 +1259,62 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     frame = ttk.Frame(root, padding=pad)
     frame.grid(row=0, column=0)
 
-    ttk.Label(frame, text="Title").grid(row=0, column=0, sticky="w", pady=(0, 4 * _UI_SCALE))
+    printer_store = {"value": _load_printer_store()}
+
+    ttk.Label(frame, text="Printer").grid(row=0, column=0, sticky="w", pady=(0, 4 * _UI_SCALE))
+    printer_row = ttk.Frame(frame)
+    printer_row.grid(row=0, column=1, sticky="we", pady=(0, 4 * _UI_SCALE))
+    printer_var = tk.StringVar(value=printer_store["value"].selected)
+    printer_combo = ttk.Combobox(
+        printer_row,
+        textvariable=printer_var,
+        values=printer_store["value"].names(),
+        state="readonly",
+        width=22,
+    )
+    printer_combo.pack(side=tk.LEFT)
+
+    def refresh_printer_combo(store: PrinterStore | None = None) -> None:
+        store = store or _load_printer_store()
+        printer_store["value"] = store
+        names = store.names()
+        printer_combo.configure(values=names)
+        if store.selected and store.selected in names:
+            printer_var.set(store.selected)
+        elif names:
+            printer_var.set(names[0])
+        else:
+            printer_var.set("")
+
+    def on_printer_selected(*_args: object) -> None:
+        name = printer_var.get().strip()
+        store = printer_store["value"]
+        if not name or name == store.selected:
+            return
+        if store.get(name) is None:
+            return
+        store.selected = name
+        _save_printer_store(store)
+
+    def open_manager() -> None:
+        _open_printer_manager(root, refresh_printer_combo)
+
+    ttk.Button(printer_row, text="Manage…", command=open_manager).pack(
+        side=tk.LEFT, padx=(8, 0)
+    )
+    printer_combo.bind("<<ComboboxSelected>>", on_printer_selected)
+
+    ttk.Label(frame, text="Title").grid(row=1, column=0, sticky="w", pady=(0, 4 * _UI_SCALE))
     title_var = tk.StringVar(value=default_title)
     title_entry = ttk.Entry(frame, textvariable=title_var, width=34)
-    title_entry.grid(row=0, column=1, sticky="we", pady=(0, 4 * _UI_SCALE))
+    title_entry.grid(row=1, column=1, sticky="we", pady=(0, 4 * _UI_SCALE))
 
-    ttk.Label(frame, text="Barcode").grid(row=1, column=0, sticky="w")
+    ttk.Label(frame, text="Barcode").grid(row=2, column=0, sticky="w")
     serial_var = tk.StringVar()
     serial_entry = ttk.Entry(frame, textvariable=serial_var, width=34)
-    serial_entry.grid(row=1, column=1, sticky="we")
+    serial_entry.grid(row=2, column=1, sticky="we")
 
-    ttk.Label(frame, text="Look").grid(row=2, column=0, sticky="w", pady=(10 * _UI_SCALE, 0))
+    ttk.Label(frame, text="Look").grid(row=3, column=0, sticky="w", pady=(10 * _UI_SCALE, 0))
     look_title_var = tk.StringVar(value=layout.recipe.title)
     look_combo = ttk.Combobox(
         frame,
@@ -980,11 +1323,11 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         state="readonly",
         width=18,
     )
-    look_combo.grid(row=2, column=1, sticky="w", pady=(10 * _UI_SCALE, 0))
+    look_combo.grid(row=3, column=1, sticky="w", pady=(10 * _UI_SCALE, 0))
 
     hint_var = tk.StringVar(value=layout.recipe.blurb)
     hint_label = ttk.Label(frame, textvariable=hint_var, style="Hint.TLabel")
-    hint_label.grid(row=3, column=1, sticky="w", pady=(2, 0))
+    hint_label.grid(row=4, column=1, sticky="w", pady=(2, 0))
 
     note_size_var = tk.StringVar(value=layout.note_size)
 
@@ -993,14 +1336,14 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     note_stepper, note_size_label = _add_size_stepper(
         frame,
-        row=4,
+        row=5,
         label="Note size",
         size_var=note_size_var,
         on_change=schedule_preview_proxy,
     )
 
-    copies_row = 5
-    preview_row = 6
+    copies_row = 6
+    preview_row = 7
     ttk.Label(frame, text="Copies").grid(
         row=copies_row, column=0, sticky="w", pady=(8 * _UI_SCALE, 0)
     )
@@ -1152,14 +1495,26 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         root.update_idletasks()
 
         try:
-            host, port = _load_printer_config()
-            status_var.set(_status_line(f"Connecting to {host}:{port}…"))
+            store = _load_printer_store()
+            printer = store.selected_printer()
+            if printer is None:
+                raise FileNotFoundError(
+                    "No printer configured. Click Manage… to add one."
+                )
+            status_var.set(
+                _status_line(f"Connecting to {printer.name} ({printer.host}:{printer.port})…")
+            )
             root.update_idletasks()
             _send_zpl(zpl)
         except FileNotFoundError as exc:
             status_var.set(_status_line(str(exc)))
             set_printing(True)
-            serial_entry.focus_force()
+            if messagebox.askyesno(
+                "No printer",
+                f"{exc}\n\nOpen printer manager now?",
+                parent=root,
+            ):
+                open_manager()
             return
         except OSError as exc:
             try:
