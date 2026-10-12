@@ -1,5 +1,5 @@
 import argparse
-import base64
+import io
 import json
 import re
 import socket
@@ -11,7 +11,11 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
+
+import customtkinter as ctk
+from PIL import Image, ImageDraw, ImageFilter
 
 _CONFIG_DIR = Path(__file__).resolve().parent
 _CONFIG_PATH = _CONFIG_DIR / "printer_config.json"
@@ -870,11 +874,70 @@ def _build_zpl(
 
 _UI_SCALE = 2
 _PREVIEW_DEBOUNCE_MS = 350
-_PREVIEW_MAX_WIDTH = 480
-_PREVIEW_MAX_HEIGHT = 200
-_BUTTON_GAP = 10
+_PREVIEW_MAX_WIDTH = 520
+_PREVIEW_MAX_HEIGHT = 220
+_BUTTON_GAP = 14
 _STATUS_MAX_CHARS = 72
-_SUCCESS_HOLD_MS = 900
+_SUCCESS_HOLD_MS = 1100
+_FADE_STEPS = 10
+_FADE_MS = 18
+
+# Calm workshop palette — cool mist + deep slate ink + quiet teal.
+# Psychology: soft ground lowers arousal; high-contrast type aids scanning;
+# teal CTA signals “go” without alarm (unlike red) or SaaS-purple cliché.
+_THEME = {
+    "bg": "#E7EEF2",
+    "surface": "#F5F8FA",
+    "stage": "#D5DEE5",
+    "ink": "#1A2A33",
+    "muted": "#5C6D78",
+    "line": "#C5D0D8",
+    "accent": "#2C6B66",
+    "accent_hover": "#245853",
+    "accent_soft": "#D7E8E6",
+    "ok": "#2F6B4F",
+    "warn": "#8F6A28",
+    "danger": "#A13D3D",
+    "white": "#FFFFFF",
+}
+
+
+def _pick_ui_font() -> str:
+    """Prefer a calm humanist sans; avoid Inter/Roboto/Arial defaults."""
+    available = {name.lower() for name in tkfont.families()}
+    for candidate in (
+        "Cantarell",
+        "Noto Sans Display",
+        "Segoe UI Variable",
+        "Segoe UI",
+        "Noto Sans",
+        "DejaVu Sans",
+    ):
+        if candidate.lower() in available:
+            return candidate
+    return "TkDefaultFont"
+
+
+def _pick_mono_font() -> str:
+    available = {name.lower() for name in tkfont.families()}
+    for candidate in (
+        "JetBrains Mono",
+        "Cascadia Mono",
+        "Cascadia Code",
+        "Consolas",
+        "DejaVu Sans Mono",
+    ):
+        if candidate.lower() in available:
+            return candidate
+    return "TkFixedFont"
+
+
+def _apply_app_theme() -> tuple[str, str]:
+    ctk.set_appearance_mode("light")
+    ctk.set_default_color_theme("green")
+    ui = _pick_ui_font()
+    mono = _pick_mono_font()
+    return ui, mono
 
 
 def _status_line(message: str) -> str:
@@ -912,12 +975,65 @@ def _fetch_labelary_png(zpl: str) -> bytes:
         raise RuntimeError(f"Preview unavailable: {exc.reason}") from exc
 
 
-def _png_to_photo(png_data: bytes, max_width: int = _PREVIEW_MAX_WIDTH) -> tk.PhotoImage:
-    photo = tk.PhotoImage(data=base64.b64encode(png_data))
-    if photo.width() > max_width:
-        factor = max(2, (photo.width() + max_width - 1) // max_width)
-        photo = photo.subsample(factor, factor)
-    return photo
+def _png_to_preview_image(
+    png_data: bytes, max_width: int = _PREVIEW_MAX_WIDTH
+) -> ctk.CTkImage:
+    """Scale the label and seat it on a soft shadowed stage (figure–ground)."""
+    label = Image.open(io.BytesIO(png_data)).convert("RGBA")
+    scale = min(1.0, max_width / max(1, label.width))
+    if scale < 1.0:
+        label = label.resize(
+            (max(1, int(label.width * scale)), max(1, int(label.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+
+    pad_x, pad_y, shadow = 18, 16, 10
+    stage_w = label.width + pad_x * 2 + shadow
+    stage_h = label.height + pad_y * 2 + shadow
+    stage = Image.new("RGBA", (stage_w, stage_h), (0, 0, 0, 0))
+
+    # Soft contact shadow — depth without glow or heavy chrome.
+    shadow_layer = Image.new("RGBA", (stage_w, stage_h), (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow_layer)
+    shadow_draw.rounded_rectangle(
+        (pad_x + 3, pad_y + 5, pad_x + label.width + 3, pad_y + label.height + 5),
+        radius=6,
+        fill=(26, 42, 51, 55),
+    )
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=6))
+    stage.alpha_composite(shadow_layer)
+
+    card = Image.new("RGBA", (label.width + 2, label.height + 2), (255, 255, 255, 255))
+    card_draw = ImageDraw.Draw(card)
+    card_draw.rectangle(
+        (0, 0, card.width - 1, card.height - 1), outline=(197, 208, 216, 255)
+    )
+    stage.paste(card, (pad_x - 1, pad_y - 1))
+    stage.alpha_composite(label, (pad_x, pad_y))
+
+    return ctk.CTkImage(
+        light_image=stage,
+        dark_image=stage,
+        size=(stage_w, stage_h),
+    )
+
+
+def _fade_in(window: tk.Misc, *, steps: int = _FADE_STEPS, ms: int = _FADE_MS) -> None:
+    """Gentle appear — reduces startle when the dialog pops over work."""
+    try:
+        window.attributes("-alpha", 0.0)
+    except tk.TclError:
+        return
+
+    def step(i: int = 0) -> None:
+        try:
+            window.attributes("-alpha", min(1.0, (i + 1) / steps))
+        except tk.TclError:
+            return
+        if i + 1 < steps:
+            window.after(ms, lambda: step(i + 1))
+
+    window.after(ms, step)
 
 
 def _preview_label(
@@ -971,15 +1087,25 @@ def _work_area_origin_and_size(window: tk.Tk) -> tuple[int, int, int, int]:
     return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
 
 
-def _center_window(window: tk.Tk, *, height: int | None = None) -> None:
+def _center_window(
+    window: tk.Misc,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    min_width: int = 0,
+) -> None:
     window.update_idletasks()
-    width = window.winfo_reqwidth()
+    width = max(width or window.winfo_reqwidth(), min_width)
     height = height or window.winfo_reqheight()
     area_x, area_y, area_w, area_h = _work_area_origin_and_size(window)
     x = area_x + max(0, (area_w - width) // 2)
     y = area_y + max(0, (area_h - height) // 2)
-    window.geometry(f"{width}x{height}+{x}+{y}")
-    window.deiconify()
+    # CTk.geometry() re-applies window scaling; winfo_* is already in pixels.
+    tk.Wm.geometry(window, f"{width}x{height}+{x}+{y}")
+    try:
+        window.deiconify()
+    except tk.TclError:
+        pass
 
 
 def _parse_args():
@@ -1059,55 +1185,128 @@ def _look_title_for_id(look_id: str) -> str:
 def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
     """Modal dialog to add / edit / remove named printers in printer_config.json."""
     store = _load_printer_store()
-    win = tk.Toplevel(parent)
+    t = _THEME
+    ui_font, _mono = _apply_app_theme()
+
+    win = ctk.CTkToplevel(parent)
     win.title("Manage printers")
     win.transient(parent)
     win.resizable(False, False)
     win.attributes("-topmost", True)
-    pad = 12 * _UI_SCALE
-    body = ttk.Frame(win, padding=pad)
-    body.grid(row=0, column=0)
+    win.configure(fg_color=t["bg"])
 
-    ttk.Label(body, text="Saved printers (local only)").grid(
-        row=0, column=0, columnspan=2, sticky="w"
+    body = ctk.CTkFrame(win, fg_color=t["surface"], corner_radius=14, border_width=1, border_color=t["line"])
+    body.grid(row=0, column=0, padx=18, pady=18, sticky="nsew")
+    body.grid_columnconfigure(1, weight=1)
+
+    ctk.CTkLabel(
+        body,
+        text="Printers",
+        font=ctk.CTkFont(family=ui_font, size=18, weight="bold"),
+        text_color=t["ink"],
+    ).grid(row=0, column=0, columnspan=2, sticky="w", padx=18, pady=(16, 2))
+    ctk.CTkLabel(
+        body,
+        text="Saved on this computer only",
+        font=ctk.CTkFont(family=ui_font, size=12),
+        text_color=t["muted"],
+    ).grid(row=1, column=0, columnspan=2, sticky="w", padx=18, pady=(0, 10))
+
+    list_frame = ctk.CTkFrame(body, fg_color=t["bg"], corner_radius=10)
+    list_frame.grid(row=2, column=0, columnspan=2, sticky="we", padx=18, pady=(0, 12))
+    listbox = tk.Listbox(
+        list_frame,
+        height=6,
+        width=36,
+        exportselection=False,
+        activestyle="dotbox",
+        background=t["bg"],
+        foreground=t["ink"],
+        selectbackground=t["accent"],
+        selectforeground=t["white"],
+        highlightthickness=0,
+        borderwidth=0,
+        font=(ui_font, 11),
     )
-    listbox = tk.Listbox(body, height=6, width=36, exportselection=False)
-    listbox.grid(row=1, column=0, columnspan=2, sticky="we", pady=(4, 8))
+    listbox.pack(fill="both", expand=True, padx=8, pady=8)
 
-    ttk.Label(body, text="Name").grid(row=2, column=0, sticky="w")
+    def field_label(row: int, text: str) -> None:
+        ctk.CTkLabel(
+            body,
+            text=text,
+            font=ctk.CTkFont(family=ui_font, size=12),
+            text_color=t["muted"],
+        ).grid(row=row, column=0, sticky="w", padx=(18, 10), pady=5)
+
     name_var = tk.StringVar()
-    name_entry = ttk.Entry(body, textvariable=name_var, width=28)
-    name_entry.grid(row=2, column=1, sticky="we", pady=2)
-
-    ttk.Label(body, text="IP / host").grid(row=3, column=0, sticky="w")
     host_var = tk.StringVar()
-    host_entry = ttk.Entry(body, textvariable=host_var, width=28)
-    host_entry.grid(row=3, column=1, sticky="we", pady=2)
-
-    ttk.Label(body, text="Port").grid(row=4, column=0, sticky="w")
     port_var = tk.StringVar(value=str(_DEFAULT_PRINTER_PORT))
-    port_entry = ttk.Entry(body, textvariable=port_var, width=10)
-    port_entry.grid(row=4, column=1, sticky="w", pady=2)
-
     status_var = tk.StringVar(value="")
-    ttk.Label(body, textvariable=status_var, style="Hint.TLabel").grid(
-        row=5, column=0, columnspan=2, sticky="w", pady=(6, 0)
+
+    field_label(3, "Name")
+    name_entry = ctk.CTkEntry(
+        body,
+        textvariable=name_var,
+        width=260,
+        height=34,
+        corner_radius=8,
+        border_color=t["line"],
+        fg_color=t["white"],
+        text_color=t["ink"],
+        font=ctk.CTkFont(family=ui_font, size=13),
     )
+    name_entry.grid(row=3, column=1, sticky="we", padx=(0, 18), pady=5)
+
+    field_label(4, "IP / host")
+    host_entry = ctk.CTkEntry(
+        body,
+        textvariable=host_var,
+        width=260,
+        height=34,
+        corner_radius=8,
+        border_color=t["line"],
+        fg_color=t["white"],
+        text_color=t["ink"],
+        font=ctk.CTkFont(family=ui_font, size=13),
+    )
+    host_entry.grid(row=4, column=1, sticky="we", padx=(0, 18), pady=5)
+
+    field_label(5, "Port")
+    port_entry = ctk.CTkEntry(
+        body,
+        textvariable=port_var,
+        width=100,
+        height=34,
+        corner_radius=8,
+        border_color=t["line"],
+        fg_color=t["white"],
+        text_color=t["ink"],
+        font=ctk.CTkFont(family=ui_font, size=13),
+    )
+    port_entry.grid(row=5, column=1, sticky="w", padx=(0, 18), pady=5)
+
+    status_label = ctk.CTkLabel(
+        body,
+        textvariable=status_var,
+        font=ctk.CTkFont(family=ui_font, size=12),
+        text_color=t["muted"],
+        anchor="w",
+    )
+    status_label.grid(row=6, column=0, columnspan=2, sticky="we", padx=18, pady=(8, 0))
 
     editing_name = {"value": ""}
 
     def refresh_list(select_name: str | None = None) -> None:
         listbox.delete(0, tk.END)
         for printer in store.printers:
-            mark = " ★" if printer.name == store.selected else ""
-            listbox.insert(tk.END, f"{printer.name}  ({printer.host}:{printer.port}){mark}")
-        target = select_name or store.selected
-        if target:
-            for idx, printer in enumerate(store.printers):
-                if printer.name == target:
+            mark = " ●" if printer.name == store.selected else ""
+            listbox.insert(tk.END, f"{printer.name}  ·  {printer.host}:{printer.port}{mark}")
+        if select_name:
+            for i, printer in enumerate(store.printers):
+                if printer.name == select_name:
                     listbox.selection_clear(0, tk.END)
-                    listbox.selection_set(idx)
-                    listbox.see(idx)
+                    listbox.selection_set(i)
+                    listbox.see(i)
                     break
 
     def clear_fields() -> None:
@@ -1115,10 +1314,8 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
         name_var.set("")
         host_var.set("")
         port_var.set(str(_DEFAULT_PRINTER_PORT))
-        status_var.set("")
-        listbox.selection_clear(0, tk.END)
 
-    def load_selected(*_args: object) -> None:
+    def load_selected(_event=None) -> None:
         selection = listbox.curselection()
         if not selection:
             return
@@ -1127,7 +1324,6 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
         name_var.set(printer.name)
         host_var.set(printer.host)
         port_var.set(str(printer.port))
-        status_var.set("Editing — Save changes or Delete")
 
     def persist() -> None:
         _save_printer_store(store)
@@ -1135,70 +1331,47 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
 
     def on_new() -> None:
         clear_fields()
-        status_var.set("Enter name, IP, and port — then Add")
+        status_var.set("New printer")
         name_entry.focus_force()
 
-    def on_add() -> None:
+    def on_save() -> None:
+        name = name_var.get().strip()
+        host = host_var.get().strip()
         try:
-            name, host, port = _validate_printer_fields(
-                name_var.get(),
-                host_var.get(),
-                port_var.get(),
-                existing=set(store.names()),
-            )
-        except ValueError as exc:
-            messagebox.showwarning("Printer", str(exc), parent=win)
+            port = int(port_var.get().strip())
+        except ValueError:
+            status_var.set("Port must be a number")
             return
-        store.printers.append(PrinterEntry(name=name, host=host, port=port))
+        if not name or not host:
+            status_var.set("Name and IP / host are required")
+            return
+        if not (1 <= port <= 65535):
+            status_var.set("Port must be between 1 and 65535")
+            return
+        entry = PrinterEntry(name=name, host=host, port=port)
+        old = editing_name["value"]
+        if old and old != name:
+            store.printers = [p for p in store.printers if p.name != old]
+            if store.selected == old:
+                store.selected = name
+        else:
+            store.printers = [p for p in store.printers if p.name != name]
+        store.printers.append(entry)
+        store.printers.sort(key=lambda p: p.name.lower())
         if not store.selected:
             store.selected = name
         persist()
-        refresh_list(name)
         editing_name["value"] = name
-        status_var.set(f'Added "{name}"')
-
-    def on_save() -> None:
-        selection = listbox.curselection()
-        if not selection and not editing_name["value"]:
-            on_add()
-            return
-        old_name = editing_name["value"]
-        if not old_name and selection:
-            old_name = store.printers[selection[0]].name
-        if not old_name:
-            on_add()
-            return
-        try:
-            name, host, port = _validate_printer_fields(
-                name_var.get(),
-                host_var.get(),
-                port_var.get(),
-                existing=set(store.names()),
-                renaming_from=old_name,
-            )
-        except ValueError as exc:
-            messagebox.showwarning("Printer", str(exc), parent=win)
-            return
-        idx = next(i for i, p in enumerate(store.printers) if p.name == old_name)
-        store.printers[idx] = PrinterEntry(name=name, host=host, port=port)
-        if store.selected == old_name:
-            store.selected = name
-        editing_name["value"] = name
-        persist()
         refresh_list(name)
         status_var.set(f'Saved "{name}"')
 
     def on_delete() -> None:
         selection = listbox.curselection()
-        name = editing_name["value"]
-        if selection:
-            name = store.printers[selection[0]].name
-        if not name:
+        if not selection:
             messagebox.showinfo("Printer", "Select a printer to delete.", parent=win)
             return
-        if not messagebox.askyesno(
-            "Delete printer", f'Delete "{name}"?', parent=win
-        ):
+        name = store.printers[selection[0]].name
+        if not messagebox.askyesno("Delete printer", f'Delete "{name}"?', parent=win):
             return
         store.printers = [p for p in store.printers if p.name != name]
         if store.selected == name:
@@ -1221,13 +1394,63 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
     def on_close() -> None:
         win.destroy()
 
-    buttons = ttk.Frame(body)
-    buttons.grid(row=6, column=0, columnspan=2, sticky="we", pady=(10, 0))
-    ttk.Button(buttons, text="Clear form", command=on_new).pack(side=tk.LEFT)
-    ttk.Button(buttons, text="Save", command=on_save).pack(side=tk.LEFT, padx=(6, 0))
-    ttk.Button(buttons, text="Delete", command=on_delete).pack(side=tk.LEFT, padx=(6, 0))
-    ttk.Button(buttons, text="Use", command=on_use).pack(side=tk.LEFT, padx=(6, 0))
-    ttk.Button(buttons, text="Done", command=on_close).pack(side=tk.RIGHT)
+    buttons = ctk.CTkFrame(body, fg_color="transparent")
+    buttons.grid(row=7, column=0, columnspan=2, sticky="we", padx=18, pady=(14, 16))
+    btn_kwargs = {
+        "height": 32,
+        "corner_radius": 8,
+        "font": ctk.CTkFont(family=ui_font, size=12),
+    }
+    ctk.CTkButton(
+        buttons,
+        text="Clear",
+        command=on_new,
+        fg_color=t["bg"],
+        hover_color=t["line"],
+        text_color=t["ink"],
+        width=70,
+        **btn_kwargs,
+    ).pack(side=tk.LEFT)
+    ctk.CTkButton(
+        buttons,
+        text="Save",
+        command=on_save,
+        fg_color=t["accent"],
+        hover_color=t["accent_hover"],
+        text_color=t["white"],
+        width=70,
+        **btn_kwargs,
+    ).pack(side=tk.LEFT, padx=(8, 0))
+    ctk.CTkButton(
+        buttons,
+        text="Delete",
+        command=on_delete,
+        fg_color=t["bg"],
+        hover_color=t["line"],
+        text_color=t["danger"],
+        width=70,
+        **btn_kwargs,
+    ).pack(side=tk.LEFT, padx=(8, 0))
+    ctk.CTkButton(
+        buttons,
+        text="Use",
+        command=on_use,
+        fg_color=t["accent_soft"],
+        hover_color=t["line"],
+        text_color=t["accent"],
+        width=70,
+        **btn_kwargs,
+    ).pack(side=tk.LEFT, padx=(8, 0))
+    ctk.CTkButton(
+        buttons,
+        text="Done",
+        command=on_close,
+        fg_color=t["ink"],
+        hover_color="#132029",
+        text_color=t["white"],
+        width=80,
+        **btn_kwargs,
+    ).pack(side=tk.RIGHT)
 
     listbox.bind("<<ListboxSelect>>", load_selected)
     listbox.bind("<Double-Button-1>", lambda _e: on_use())
@@ -1237,35 +1460,66 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
         name_entry.focus_force()
 
     win.protocol("WM_DELETE_WINDOW", on_close)
+    win.update_idletasks()
+    _center_window(win)
+    _fade_in(win)
     win.grab_set()
     parent.wait_window(win)
 
 
 def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None):
-    """Minimal everyday UI: title, barcode, preview, print. Extras under More."""
+    """Calm everyday UI: content → preview → print; extras under More."""
     layout = layout or LabelLayout()
-    pad = 14 * _UI_SCALE
+    t = _THEME
 
-    root = tk.Tk()
+    root = ctk.CTk()
     root.withdraw()
+    ui_font, mono_font = _apply_app_theme()
+    # CTk has its own DPI handling; keep a mild bump instead of 2× tk scaling.
+    try:
+        ctk.set_widget_scaling(1.15 if _UI_SCALE >= 2 else 1.0)
+        ctk.set_window_scaling(1.15 if _UI_SCALE >= 2 else 1.0)
+    except Exception:
+        pass
     root.title("Print label")
     root.resizable(False, False)
     root.attributes("-topmost", True)
-    root.tk.call("tk", "scaling", float(root.tk.call("tk", "scaling")) * _UI_SCALE)
+    root.configure(fg_color=t["bg"])
 
-    style = ttk.Style(root)
-    try:
-        style.configure("Hint.TLabel", foreground="#6B6B6B")
-        style.configure("Status.TLabel", font=("Segoe UI", 9), foreground="#B00020")
-        style.configure("Warn.TLabel", font=("Segoe UI", 9), foreground="#8A6116")
-        style.configure("Ok.TLabel", font=("Segoe UI", 9), foreground="#1B5E20")
-        style.configure("More.TCheckbutton", foreground="#555555")
-    except tk.TclError:
-        pass
+    dialog_width = 520
 
-    outer = ttk.Frame(root, padding=pad)
-    outer.grid(row=0, column=0)
+    outer = ctk.CTkFrame(root, fg_color=t["bg"], corner_radius=0, width=dialog_width)
+    outer.grid(row=0, column=0, sticky="nsew")
     outer.grid_columnconfigure(0, weight=1)
+    outer.grid_propagate(True)
+
+    # Soft surface card — one composition, not a dashboard of chrome.
+    card = ctk.CTkFrame(
+        outer,
+        fg_color=t["surface"],
+        corner_radius=16,
+        border_width=1,
+        border_color=t["line"],
+        width=dialog_width - 32,
+    )
+    card.grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
+    card.grid_columnconfigure(0, weight=1)
+
+    # Brand-first whisper: product name leads; job is secondary.
+    ctk.CTkLabel(
+        card,
+        text="Label",
+        font=ctk.CTkFont(family=ui_font, size=22, weight="bold"),
+        text_color=t["ink"],
+        anchor="w",
+    ).grid(row=0, column=0, sticky="w", padx=22, pady=(18, 0))
+    ctk.CTkLabel(
+        card,
+        text="What you see is what prints",
+        font=ctk.CTkFont(family=ui_font, size=12),
+        text_color=t["muted"],
+        anchor="w",
+    ).grid(row=1, column=0, sticky="w", padx=22, pady=(2, 14))
 
     printer_store = {"value": _load_printer_store()}
     auto_look = {"busy": False}
@@ -1275,52 +1529,105 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         "after_id": None,
         "closed": False,
         "printed": 0,
+        "pulse_after": None,
     }
 
-    # —— Everyday: title + barcode ——
-    content = ttk.Frame(outer)
-    content.grid(row=0, column=0, sticky="we")
-    content.grid_columnconfigure(1, weight=1)
+    content = ctk.CTkFrame(card, fg_color="transparent")
+    content.grid(row=2, column=0, sticky="we", padx=22)
+    content.grid_columnconfigure(0, weight=1)
 
-    ttk.Label(content, text="Title").grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ctk.CTkLabel(
+        content,
+        text="Title",
+        font=ctk.CTkFont(family=ui_font, size=12),
+        text_color=t["muted"],
+        anchor="w",
+    ).grid(row=0, column=0, sticky="w")
     title_var = tk.StringVar(value=default_title)
-    title_entry = ttk.Entry(content, textvariable=title_var, width=36)
-    title_entry.grid(row=0, column=1, sticky="we", pady=(0, 8))
-
-    ttk.Label(content, text="Barcode").grid(row=1, column=0, sticky="w")
-    serial_var = tk.StringVar()
-    serial_entry = ttk.Entry(content, textvariable=serial_var, width=36)
-    serial_entry.grid(row=1, column=1, sticky="we")
-
-    # —— Preview ——
-    preview_frame = ttk.Frame(outer, padding=(0, 12, 0, 0))
-    preview_frame.grid(row=1, column=0, sticky="we")
-    preview_frame.grid_columnconfigure(0, weight=1)
-    preview_frame.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
-    preview_label = ttk.Label(
-        preview_frame,
-        text="Loading preview…",
-        anchor="center",
-        justify="center",
+    field_width = dialog_width - 76
+    title_entry = ctk.CTkEntry(
+        content,
+        textvariable=title_var,
+        width=field_width,
+        height=38,
+        corner_radius=10,
+        border_width=1,
+        border_color=t["line"],
+        fg_color=t["white"],
+        text_color=t["ink"],
+        placeholder_text="Act, Req, Serienummer…",
+        font=ctk.CTkFont(family=ui_font, size=14),
     )
-    preview_label.grid(row=0, column=0, sticky="n")
+    title_entry.grid(row=1, column=0, sticky="we", pady=(4, 12))
+
+    ctk.CTkLabel(
+        content,
+        text="Barcode",
+        font=ctk.CTkFont(family=ui_font, size=12),
+        text_color=t["muted"],
+        anchor="w",
+    ).grid(row=2, column=0, sticky="w")
+    serial_var = tk.StringVar()
+    serial_entry = ctk.CTkEntry(
+        content,
+        textvariable=serial_var,
+        width=field_width,
+        height=38,
+        corner_radius=10,
+        border_width=1,
+        border_color=t["line"],
+        fg_color=t["white"],
+        text_color=t["ink"],
+        placeholder_text="Scan or type · empty = note",
+        font=ctk.CTkFont(family=mono_font, size=14),
+    )
+    serial_entry.grid(row=3, column=0, sticky="we", pady=(4, 0))
+
+    # Preview stage — figure–ground: cooler well makes the white label pop.
+    stage = ctk.CTkFrame(
+        card,
+        fg_color=t["stage"],
+        corner_radius=14,
+        border_width=0,
+    )
+    stage.grid(row=3, column=0, sticky="we", padx=22, pady=(16, 0))
+    stage.grid_columnconfigure(0, weight=1)
+    stage.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT + 36)
+    preview_label = ctk.CTkLabel(
+        stage,
+        text="Preparing preview…",
+        font=ctk.CTkFont(family=ui_font, size=13),
+        text_color=t["muted"],
+        anchor="center",
+    )
+    preview_label.grid(row=0, column=0, sticky="nsew", padx=12, pady=14)
 
     status_var = tk.StringVar(value="")
-    status_label = ttk.Label(outer, textvariable=status_var, style="Status.TLabel")
-    status_label.grid(row=2, column=0, sticky="w", pady=(4, 0))
-
-    # —— More (collapsed): printer, look, size, copies ——
-    more_open = tk.BooleanVar(value=False)
-    more_toggle = ttk.Checkbutton(
-        outer,
-        text="More options",
-        variable=more_open,
-        style="More.TCheckbutton",
+    status_label = ctk.CTkLabel(
+        card,
+        textvariable=status_var,
+        font=ctk.CTkFont(family=ui_font, size=12),
+        text_color=t["danger"],
+        anchor="w",
     )
-    more_toggle.grid(row=3, column=0, sticky="w", pady=(10, 0))
+    status_label.grid(row=4, column=0, sticky="we", padx=22, pady=(8, 0))
 
-    more = ttk.Frame(outer)
-    # packed/gridded when opened
+    more_open = tk.BooleanVar(value=False)
+    more_toggle = ctk.CTkButton(
+        card,
+        text="More options  ▾",
+        command=lambda: more_open.set(not more_open.get()),
+        fg_color="transparent",
+        hover_color=t["bg"],
+        text_color=t["muted"],
+        height=28,
+        anchor="w",
+        font=ctk.CTkFont(family=ui_font, size=12),
+    )
+    more_toggle.grid(row=5, column=0, sticky="w", padx=18, pady=(8, 0))
+
+    more = ctk.CTkFrame(card, fg_color=t["bg"], corner_radius=12)
+    more.grid_columnconfigure(1, weight=1)
 
     if not default_title.strip() and layout.look in (_DEFAULT_LOOK, _NOTE_LOOK):
         initial_look_title = _NOTE_LOOK_TITLE
@@ -1331,15 +1638,33 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     copies_var = tk.StringVar(value="1")
     printer_var = tk.StringVar(value=printer_store["value"].selected)
 
-    ttk.Label(more, text="Printer").grid(row=0, column=0, sticky="w", pady=(8, 4))
-    printer_row = ttk.Frame(more)
-    printer_row.grid(row=0, column=1, sticky="w", pady=(8, 4))
-    printer_combo = ttk.Combobox(
+    def more_label(row: int, text: str) -> None:
+        ctk.CTkLabel(
+            more,
+            text=text,
+            font=ctk.CTkFont(family=ui_font, size=12),
+            text_color=t["muted"],
+        ).grid(row=row, column=0, sticky="w", padx=(14, 12), pady=8)
+
+    more_label(0, "Printer")
+    printer_row = ctk.CTkFrame(more, fg_color="transparent")
+    printer_row.grid(row=0, column=1, sticky="w", pady=8, padx=(0, 14))
+    printer_combo = ctk.CTkComboBox(
         printer_row,
-        textvariable=printer_var,
-        values=printer_store["value"].names(),
+        variable=printer_var,
+        values=printer_store["value"].names() or [""],
+        width=180,
+        height=32,
+        corner_radius=8,
+        border_color=t["line"],
+        fg_color=t["white"],
+        button_color=t["ink"],
+        button_hover_color="#132029",
+        dropdown_fg_color=t["white"],
+        dropdown_hover_color=t["bg"],
+        text_color=t["ink"],
+        font=ctk.CTkFont(family=ui_font, size=12),
         state="readonly",
-        width=18,
     )
     printer_combo.pack(side=tk.LEFT)
 
@@ -1347,7 +1672,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         store = store or _load_printer_store()
         printer_store["value"] = store
         names = store.names()
-        printer_combo.configure(values=names)
+        printer_combo.configure(values=names or [""])
         if store.selected and store.selected in names:
             printer_var.set(store.selected)
         elif names:
@@ -1355,8 +1680,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         else:
             printer_var.set("")
 
-    def on_printer_selected(*_args: object) -> None:
-        name = printer_var.get().strip()
+    def on_printer_selected(choice: str) -> None:
+        name = (choice or "").strip()
         store = printer_store["value"]
         if not name or name == store.selected or store.get(name) is None:
             return
@@ -1366,30 +1691,55 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     def open_manager() -> None:
         _open_printer_manager(root, refresh_printer_combo)
 
-    ttk.Button(printer_row, text="Manage…", command=open_manager).pack(
-        side=tk.LEFT, padx=(8, 0)
-    )
-    printer_combo.bind("<<ComboboxSelected>>", on_printer_selected)
+    ctk.CTkButton(
+        printer_row,
+        text="Manage…",
+        command=open_manager,
+        width=88,
+        height=32,
+        corner_radius=8,
+        fg_color=t["surface"],
+        hover_color=t["line"],
+        text_color=t["ink"],
+        border_width=1,
+        border_color=t["line"],
+        font=ctk.CTkFont(family=ui_font, size=12),
+    ).pack(side=tk.LEFT, padx=(8, 0))
+    printer_combo.configure(command=on_printer_selected)
 
-    ttk.Label(more, text="Look").grid(row=1, column=0, sticky="w", pady=4)
-    look_combo = ttk.Combobox(
+    more_label(1, "Look")
+    look_combo = ctk.CTkComboBox(
         more,
-        textvariable=look_title_var,
+        variable=look_title_var,
         values=_look_display_names(),
+        width=160,
+        height=32,
+        corner_radius=8,
+        border_color=t["line"],
+        fg_color=t["white"],
+        button_color=t["ink"],
+        button_hover_color="#132029",
+        dropdown_fg_color=t["white"],
+        dropdown_hover_color=t["bg"],
+        text_color=t["ink"],
+        font=ctk.CTkFont(family=ui_font, size=12),
         state="readonly",
-        width=14,
+        command=lambda _v: schedule_preview(),
     )
-    look_combo.grid(row=1, column=1, sticky="w", pady=4)
+    look_combo.grid(row=1, column=1, sticky="w", pady=8)
 
-    size_row = ttk.Frame(more)
-    size_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
-    note_size_label = ttk.Label(size_row, text="Note size")
-    note_size_label.pack(side=tk.LEFT)
-    note_stepper = ttk.Frame(size_row)
-    note_stepper.pack(side=tk.LEFT, padx=(8, 0))
-    size_display = tk.StringVar(
-        value=_SIZE_LABELS[_normalize_size(note_size_var.get())]
+    size_row = ctk.CTkFrame(more, fg_color="transparent")
+    size_row.grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=4)
+    note_size_label = ctk.CTkLabel(
+        size_row,
+        text="Note size",
+        font=ctk.CTkFont(family=ui_font, size=12),
+        text_color=t["muted"],
     )
+    note_size_label.pack(side=tk.LEFT)
+    note_stepper = ctk.CTkFrame(size_row, fg_color="transparent")
+    note_stepper.pack(side=tk.LEFT, padx=(10, 0))
+    size_display = tk.StringVar(value=_SIZE_LABELS[_normalize_size(note_size_var.get())])
 
     def _bump_note(delta: int) -> None:
         note_size_var.set(_bump_size(note_size_var.get(), delta))
@@ -1400,50 +1750,111 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         size_display.set(_SIZE_LABELS[_normalize_size(note_size_var.get())])
 
     note_size_var.trace_add("write", _on_note_size_write)
-    ttk.Button(note_stepper, text="−", width=3, command=lambda: _bump_note(-1)).pack(
+    step_btn = {
+        "width": 34,
+        "height": 30,
+        "corner_radius": 8,
+        "fg_color": t["surface"],
+        "hover_color": t["line"],
+        "text_color": t["ink"],
+        "border_width": 1,
+        "border_color": t["line"],
+        "font": ctk.CTkFont(family=ui_font, size=14),
+    }
+    ctk.CTkButton(note_stepper, text="−", command=lambda: _bump_note(-1), **step_btn).pack(
         side=tk.LEFT
     )
-    ttk.Label(note_stepper, textvariable=size_display, width=8, anchor="center").pack(
-        side=tk.LEFT, padx=4
-    )
-    ttk.Button(note_stepper, text="+", width=3, command=lambda: _bump_note(1)).pack(
+    ctk.CTkLabel(
+        note_stepper,
+        textvariable=size_display,
+        width=70,
+        font=ctk.CTkFont(family=ui_font, size=12),
+        text_color=t["ink"],
+    ).pack(side=tk.LEFT, padx=6)
+    ctk.CTkButton(note_stepper, text="+", command=lambda: _bump_note(1), **step_btn).pack(
         side=tk.LEFT
     )
 
-    ttk.Label(more, text="Copies").grid(row=3, column=0, sticky="w", pady=4)
-    copies_combo = ttk.Combobox(
+    more_label(3, "Copies")
+    copies_combo = ctk.CTkComboBox(
         more,
-        textvariable=copies_var,
+        variable=copies_var,
         values=[str(n) for n in range(1, 11)],
+        width=80,
+        height=32,
+        corner_radius=8,
+        border_color=t["line"],
+        fg_color=t["white"],
+        button_color=t["ink"],
+        button_hover_color="#132029",
+        dropdown_fg_color=t["white"],
+        dropdown_hover_color=t["bg"],
+        text_color=t["ink"],
+        font=ctk.CTkFont(family=ui_font, size=12),
         state="readonly",
-        width=4,
     )
-    copies_combo.grid(row=3, column=1, sticky="w", pady=4)
+    copies_combo.grid(row=3, column=1, sticky="w", pady=8)
+
+    def _fit_window() -> None:
+        root.update_idletasks()
+        card.update_idletasks()
+        # Card reqheight already includes the More panel when it is mapped.
+        needed_h = max(card.winfo_reqheight() + 36, 640)
+        needed_w = max(dialog_width, card.winfo_reqwidth() + 32)
+        _center_window(root, width=needed_w, height=needed_h, min_width=dialog_width)
 
     def toggle_more(*_args: object) -> None:
         if more_open.get():
-            more.grid(row=4, column=0, sticky="we")
+            more.grid(row=6, column=0, sticky="we", padx=22, pady=(4, 0))
+            more_toggle.configure(text="More options  ▴")
         else:
             more.grid_remove()
-        root.update_idletasks()
-        _center_window(root)
+            more_toggle.configure(text="More options  ▾")
+        root.after_idle(_fit_window)
 
     more_open.trace_add("write", toggle_more)
 
-    # —— Actions ——
-    actions = ttk.Frame(outer)
-    actions.grid(row=5, column=0, sticky="we", pady=(_BUTTON_GAP, 0))
+    actions = ctk.CTkFrame(card, fg_color="transparent")
+    actions.grid(row=7, column=0, sticky="we", padx=22, pady=(16, 18))
     actions.grid_columnconfigure(0, weight=1)
     session_var = tk.StringVar(value="")
-    ttk.Label(actions, textvariable=session_var, style="Hint.TLabel").grid(
-        row=0, column=0, sticky="w"
-    )
-    btn_row = ttk.Frame(actions)
+    ctk.CTkLabel(
+        actions,
+        textvariable=session_var,
+        font=ctk.CTkFont(family=ui_font, size=12),
+        text_color=t["muted"],
+        anchor="w",
+    ).grid(row=0, column=0, sticky="w")
+    btn_row = ctk.CTkFrame(actions, fg_color="transparent")
     btn_row.grid(row=0, column=1, sticky="e")
-    cancel_button = ttk.Button(btn_row, text="Close", command=lambda: on_cancel())
+    cancel_button = ctk.CTkButton(
+        btn_row,
+        text="Close",
+        command=lambda: on_cancel(),
+        width=96,
+        height=38,
+        corner_radius=10,
+        fg_color=t["bg"],
+        hover_color=t["line"],
+        text_color=t["ink"],
+        border_width=1,
+        border_color=t["line"],
+        font=ctk.CTkFont(family=ui_font, size=13),
+    )
     cancel_button.pack(side=tk.LEFT)
-    print_button = ttk.Button(btn_row, text="Print ↵", command=lambda: on_print())
-    print_button.pack(side=tk.LEFT, padx=(8, 0))
+    print_button = ctk.CTkButton(
+        btn_row,
+        text="Print  ↵",
+        command=lambda: on_print(),
+        width=120,
+        height=38,
+        corner_radius=10,
+        fg_color=t["accent"],
+        hover_color=t["accent_hover"],
+        text_color=t["white"],
+        font=ctk.CTkFont(family=ui_font, size=14, weight="bold"),
+    )
+    print_button.pack(side=tk.LEFT, padx=(10, 0))
 
     def current_layout() -> LabelLayout:
         return LabelLayout(
@@ -1463,6 +1874,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         auto_look["busy"] = True
         try:
             look_title_var.set(title)
+            look_combo.set(title)
         finally:
             auto_look["busy"] = False
 
@@ -1485,8 +1897,29 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             size_row.grid_remove()
         else:
             size_row.grid()
-            note_size_label.pack(side=tk.LEFT)
-            note_stepper.pack(side=tk.LEFT, padx=(8, 0))
+
+    def set_status(kind: str, message: str) -> None:
+        colors = {
+            "ok": t["ok"],
+            "warn": t["warn"],
+            "error": t["danger"],
+            "info": t["muted"],
+        }
+        status_label.configure(text_color=colors.get(kind, t["muted"]))
+        status_var.set(_status_line(message) if message else "")
+
+    def pulse_print_success() -> None:
+        """Brief CTA confirmation — reward without fireworks."""
+        print_button.configure(fg_color=t["ok"])
+        after_id = preview_state.get("pulse_after")
+        if after_id is not None:
+            root.after_cancel(after_id)
+
+        def restore() -> None:
+            print_button.configure(fg_color=t["accent"])
+            preview_state["pulse_after"] = None
+
+        preview_state["pulse_after"] = root.after(420, restore)
 
     def apply_preview(
         request_id: int,
@@ -1498,18 +1931,16 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             return
         if png_data is None:
             preview_state["photo"] = None
-            preview_label.configure(image="", text=error or "Preview unavailable")
-            status_label.configure(style="Status.TLabel")
-            status_var.set(_status_line(error or "Preview unavailable"))
+            preview_label.configure(image=None, text=error or "Preview unavailable")
+            set_status("error", error or "Preview unavailable")
             return
-        photo = _png_to_photo(png_data)
+        photo = _png_to_preview_image(png_data)
         preview_state["photo"] = photo
         preview_label.configure(image=photo, text="")
         if warnings:
-            status_label.configure(style="Warn.TLabel")
-            status_var.set(_status_line(" · ".join(warnings)))
+            set_status("warn", " · ".join(warnings))
         elif not status_var.get().startswith("Sent"):
-            status_var.set("")
+            set_status("info", "")
 
     def refresh_preview() -> None:
         request_id = preview_state["request_id"] + 1
@@ -1540,30 +1971,31 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         preview_state["after_id"] = root.after(_PREVIEW_DEBOUNCE_MS, refresh_preview)
 
     def set_printing(enabled: bool) -> None:
-        state = ["!disabled"] if enabled else ["disabled"]
-        print_button.state(state)
-        cancel_button.state(state)
-        title_entry.state(["!disabled"] if enabled else ["disabled"])
-        serial_entry.state(["!disabled"] if enabled else ["disabled"])
+        state = "normal" if enabled else "disabled"
+        print_button.configure(state=state)
+        cancel_button.configure(state=state)
+        title_entry.configure(state=state)
+        serial_entry.configure(state=state)
 
     def focus_barcode() -> None:
         serial_entry.focus_force()
-        serial_entry.selection_range(0, tk.END)
+        try:
+            serial_entry.select_range(0, tk.END)
+        except tk.TclError:
+            pass
 
     def after_success(printer_name: str) -> None:
         preview_state["printed"] += 1
         n = preview_state["printed"]
-        session_var.set(
-            f"{n} printed" if n > 1 else "1 printed"
-        )
-        status_label.configure(style="Ok.TLabel")
-        status_var.set(_status_line(f"Sent to {printer_name} ✓"))
+        session_var.set(f"{n} printed" if n > 1 else "1 printed")
+        set_status("ok", f"Sent to {printer_name} ✓")
+        pulse_print_success()
         set_printing(True)
         serial_var.set("")
         root.after(50, focus_barcode)
         root.after(
             _SUCCESS_HOLD_MS,
-            lambda: status_var.set("")
+            lambda: set_status("info", "")
             if status_var.get().startswith("Sent")
             else None,
         )
@@ -1586,8 +2018,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         zpl = built.zpl
 
         set_printing(False)
-        status_label.configure(style="Status.TLabel")
-        status_var.set(_status_line("Sending…"))
+        set_status("info", "Sending…")
         root.update_idletasks()
 
         try:
@@ -1597,11 +2028,11 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
                 raise FileNotFoundError(
                     "No printer configured. Open More options → Manage…"
                 )
-            status_var.set(_status_line(f"Connecting to {printer.name}…"))
+            set_status("info", f"Connecting to {printer.name}…")
             root.update_idletasks()
             _send_zpl(zpl)
         except FileNotFoundError as exc:
-            status_var.set(_status_line(str(exc)))
+            set_status("error", str(exc))
             set_printing(True)
             more_open.set(True)
             if messagebox.askyesno(
@@ -1617,14 +2048,12 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
                 target = f"{host}:{port}"
             except FileNotFoundError:
                 target = "printer"
-            status_label.configure(style="Status.TLabel")
-            status_var.set(_status_line(f"Could not connect to {target}: {exc}"))
+            set_status("error", f"Could not connect to {target}: {exc}")
             set_printing(True)
             focus_barcode()
             return
         except Exception as exc:
-            status_label.configure(style="Status.TLabel")
-            status_var.set(_status_line(f"Print failed: {type(exc).__name__}: {exc}"))
+            set_status("error", f"Print failed: {type(exc).__name__}: {exc}")
             set_printing(True)
             focus_barcode()
             return
@@ -1636,6 +2065,9 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         after_id = preview_state["after_id"]
         if after_id is not None:
             root.after_cancel(after_id)
+        pulse = preview_state.get("pulse_after")
+        if pulse is not None:
+            root.after_cancel(pulse)
         root.destroy()
 
     title_var.trace_add("write", schedule_preview)
@@ -1645,7 +2077,6 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     serial_var.trace_add("write", update_mode_chrome)
     look_title_var.trace_add("write", schedule_preview)
     look_title_var.trace_add("write", update_mode_chrome)
-    look_combo.bind("<<ComboboxSelected>>", schedule_preview)
     note_size_var.trace_add("write", schedule_preview)
     sync_auto_look()
     update_mode_chrome()
@@ -1654,7 +2085,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         root.bind(sequence, lambda _event: on_print())
         serial_entry.bind(sequence, lambda _event: on_print())
         title_entry.bind(sequence, lambda _event: on_print())
-    root.bind("<Escape>", lambda _event: on_cancel())
+    # Delay Escape so a leftover key event from the host cannot close on open.
+    root.after(400, lambda: root.bind("<Escape>", lambda _event: on_cancel()))
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
     def focus_initial_entry() -> None:
@@ -1665,10 +2097,11 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         else:
             title_entry.focus_force()
 
-    _center_window(root)
+    _fit_window()
+    _fade_in(root)
     schedule_preview()
     root.after(0, focus_initial_entry)
-    root.after(100, focus_initial_entry)
+    root.after(120, focus_initial_entry)
     root.mainloop()
 
 

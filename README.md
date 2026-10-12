@@ -37,4 +37,10 @@ Legacy configs that only had `"host"` / `"port"` are still read and upgraded aut
 
 ## Requirements
 
-Python 3 (stdlib only: `json`, `socket`, `pathlib`, `tkinter`).
+Python 3 with tkinter, plus:
+
+```text
+pip install -r requirements.txt
+```
+
+Uses **CustomTkinter** and **Pillow** for the print dialog UI and preview.
