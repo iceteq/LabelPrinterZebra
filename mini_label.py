@@ -247,20 +247,20 @@ class LookRecipe:
 # Tuned for 4×2: clear hierarchy, tight barcode↔caption grouping, calm margins.
 # Type sizes are intentionally bold; fit-to-box shrinks when needed.
 _LOOKS: dict[str, LookRecipe] = {
-    "scan": LookRecipe(
-        look_id="scan",
-        title="Scan",
-        blurb="Everyday — tall bars, quiet title",
+    "quiet": LookRecipe(
+        look_id="quiet",
+        title="Quiet",
+        blurb="Default — calm type, reliable bars",
         align="left",
         valign="top",
         stack="vertical",
-        title_h=40,
-        title_w=36,
-        bar_h=168,
+        title_h=48,
+        title_w=42,
+        bar_h=140,
         module_pref=3,
-        caption_h=36,
-        caption_w=30,
-        bar_fill=0.62,
+        caption_h=28,
+        caption_w=22,
+        bar_fill=0.68,
     ),
     "read_id": LookRecipe(
         look_id="read_id",
@@ -292,21 +292,6 @@ _LOOKS: dict[str, LookRecipe] = {
         caption_w=20,
         bar_fill=0.58,
     ),
-    "quiet": LookRecipe(
-        look_id="quiet",
-        title="Quiet",
-        blurb="Longer values, calmer type",
-        align="left",
-        valign="top",
-        stack="vertical",
-        title_h=48,
-        title_w=42,
-        bar_h=125,
-        module_pref=2,
-        caption_h=26,
-        caption_w=20,
-        bar_fill=0.70,
-    ),
     "side": LookRecipe(
         look_id="side",
         title="Side title",
@@ -324,8 +309,8 @@ _LOOKS: dict[str, LookRecipe] = {
     ),
 }
 
-_LOOK_ORDER = ("scan", "read_id", "label", "quiet", "side")
-_DEFAULT_LOOK = "scan"
+_LOOK_ORDER = ("quiet", "read_id", "label", "side")
+_DEFAULT_LOOK = "quiet"
 _NOTE_LOOK = "note"
 _NOTE_LOOK_TITLE = "Note"
 
@@ -337,7 +322,8 @@ def _normalize_look(value: str) -> str:
         "read": "read_id",
         "side_title": "side",
         "sidetitle": "side",
-        "default": "scan",
+        "default": "quiet",
+        "scan": "quiet",  # removed look; map old configs/CLI to Quiet
         "note": _NOTE_LOOK,
     }
     key = aliases.get(key, key)
@@ -371,7 +357,7 @@ class LabelLayout:
 
     @property
     def recipe(self) -> LookRecipe:
-        # Note is UI/mode only; barcode recipes fall back to Scan if needed.
+        # Note is UI/mode only; barcode recipes fall back to Quiet if needed.
         if self.look == _NOTE_LOOK:
             return _LOOKS[_DEFAULT_LOOK]
         return _LOOKS[self.look]
@@ -864,7 +850,7 @@ def _compose_label(
     quantity = max(1, min(10, int(copies)))
     if not serial.strip():
         return _build_note_zpl(title, layout, copies=quantity)
-    # Note look with a barcode value → print as Scan (UI normally auto-switches).
+    # Note look with a barcode value → print as Quiet (UI normally auto-switches).
     look = _DEFAULT_LOOK if layout.look == _NOTE_LOOK else layout.look
     recipe = _LOOKS[look]
     if recipe.stack == "side":
@@ -1256,7 +1242,7 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
 
 
 def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None):
-    """Print dialog: content first, big preview, quiet options, print-and-continue."""
+    """Minimal everyday UI: title, barcode, preview, print. Extras under More."""
     layout = layout or LabelLayout()
     pad = 14 * _UI_SCALE
 
@@ -1270,12 +1256,10 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     style = ttk.Style(root)
     try:
         style.configure("Hint.TLabel", foreground="#6B6B6B")
-        style.configure("Mode.TLabel", foreground="#3D5A45")
         style.configure("Status.TLabel", font=("Segoe UI", 9), foreground="#B00020")
         style.configure("Warn.TLabel", font=("Segoe UI", 9), foreground="#8A6116")
         style.configure("Ok.TLabel", font=("Segoe UI", 9), foreground="#1B5E20")
-        style.configure("Header.TLabel", foreground="#444444")
-        style.configure("Section.TLabelframe.Label", foreground="#333333")
+        style.configure("More.TCheckbutton", foreground="#555555")
     except tk.TclError:
         pass
 
@@ -1293,22 +1277,71 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         "printed": 0,
     }
 
-    # —— Header: where it prints (context, not the job) ——
-    header = ttk.Frame(outer)
-    header.grid(row=0, column=0, sticky="we")
-    header.grid_columnconfigure(1, weight=1)
-    ttk.Label(header, text="Printer", style="Header.TLabel").grid(
-        row=0, column=0, sticky="w"
+    # —— Everyday: title + barcode ——
+    content = ttk.Frame(outer)
+    content.grid(row=0, column=0, sticky="we")
+    content.grid_columnconfigure(1, weight=1)
+
+    ttk.Label(content, text="Title").grid(row=0, column=0, sticky="w", pady=(0, 8))
+    title_var = tk.StringVar(value=default_title)
+    title_entry = ttk.Entry(content, textvariable=title_var, width=36)
+    title_entry.grid(row=0, column=1, sticky="we", pady=(0, 8))
+
+    ttk.Label(content, text="Barcode").grid(row=1, column=0, sticky="w")
+    serial_var = tk.StringVar()
+    serial_entry = ttk.Entry(content, textvariable=serial_var, width=36)
+    serial_entry.grid(row=1, column=1, sticky="we")
+
+    # —— Preview ——
+    preview_frame = ttk.Frame(outer, padding=(0, 12, 0, 0))
+    preview_frame.grid(row=1, column=0, sticky="we")
+    preview_frame.grid_columnconfigure(0, weight=1)
+    preview_frame.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
+    preview_label = ttk.Label(
+        preview_frame,
+        text="Loading preview…",
+        anchor="center",
+        justify="center",
     )
+    preview_label.grid(row=0, column=0, sticky="n")
+
+    status_var = tk.StringVar(value="")
+    status_label = ttk.Label(outer, textvariable=status_var, style="Status.TLabel")
+    status_label.grid(row=2, column=0, sticky="w", pady=(4, 0))
+
+    # —— More (collapsed): printer, look, size, copies ——
+    more_open = tk.BooleanVar(value=False)
+    more_toggle = ttk.Checkbutton(
+        outer,
+        text="More options",
+        variable=more_open,
+        style="More.TCheckbutton",
+    )
+    more_toggle.grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+    more = ttk.Frame(outer)
+    # packed/gridded when opened
+
+    if not default_title.strip() and layout.look in (_DEFAULT_LOOK, _NOTE_LOOK):
+        initial_look_title = _NOTE_LOOK_TITLE
+    else:
+        initial_look_title = _look_title_for_id(layout.look)
+    look_title_var = tk.StringVar(value=initial_look_title)
+    note_size_var = tk.StringVar(value=layout.note_size)
+    copies_var = tk.StringVar(value="1")
     printer_var = tk.StringVar(value=printer_store["value"].selected)
+
+    ttk.Label(more, text="Printer").grid(row=0, column=0, sticky="w", pady=(8, 4))
+    printer_row = ttk.Frame(more)
+    printer_row.grid(row=0, column=1, sticky="w", pady=(8, 4))
     printer_combo = ttk.Combobox(
-        header,
+        printer_row,
         textvariable=printer_var,
         values=printer_store["value"].names(),
         state="readonly",
-        width=20,
+        width=18,
     )
-    printer_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
+    printer_combo.pack(side=tk.LEFT)
 
     def refresh_printer_combo(store: PrinterStore | None = None) -> None:
         store = store or _load_printer_store()
@@ -1333,82 +1366,27 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     def open_manager() -> None:
         _open_printer_manager(root, refresh_printer_combo)
 
-    ttk.Button(header, text="Manage…", command=open_manager).grid(
-        row=0, column=2, sticky="e", padx=(8, 0)
+    ttk.Button(printer_row, text="Manage…", command=open_manager).pack(
+        side=tk.LEFT, padx=(8, 0)
     )
     printer_combo.bind("<<ComboboxSelected>>", on_printer_selected)
 
-    ttk.Separator(outer, orient="horizontal").grid(
-        row=1, column=0, sticky="we", pady=(10, 12)
-    )
-
-    # —— Content: the job ——
-    content = ttk.Frame(outer)
-    content.grid(row=2, column=0, sticky="we")
-    content.grid_columnconfigure(1, weight=1)
-
-    ttk.Label(content, text="Title").grid(row=0, column=0, sticky="w")
-    title_var = tk.StringVar(value=default_title)
-    title_entry = ttk.Entry(content, textvariable=title_var, width=36)
-    title_entry.grid(row=0, column=1, sticky="we", pady=(0, 2))
-    ttk.Label(
-        content, text="e.g. Act, Req, Serienummer — or a note", style="Hint.TLabel"
-    ).grid(row=1, column=1, sticky="w", pady=(0, 8))
-
-    ttk.Label(content, text="Barcode").grid(row=2, column=0, sticky="nw", pady=(2, 0))
-    serial_var = tk.StringVar()
-    serial_entry = ttk.Entry(content, textvariable=serial_var, width=36)
-    serial_entry.grid(row=2, column=1, sticky="we", pady=(0, 2))
-    ttk.Label(
-        content,
-        text="Scan or type · leave empty for a text-only note",
-        style="Hint.TLabel",
-    ).grid(row=3, column=1, sticky="w")
-
-    # —— Preview: the product (truth) ——
-    preview_frame = ttk.LabelFrame(outer, text="Your label", padding=10 * _UI_SCALE)
-    preview_frame.grid(row=3, column=0, sticky="we", pady=(14, 0))
-    preview_frame.grid_columnconfigure(0, weight=1)
-    preview_frame.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
-    preview_label = ttk.Label(
-        preview_frame,
-        text="Loading preview…",
-        anchor="center",
-        justify="center",
-    )
-    preview_label.grid(row=0, column=0, sticky="n")
-    mode_var = tk.StringVar(value="")
-    mode_label = ttk.Label(preview_frame, textvariable=mode_var, style="Mode.TLabel")
-    mode_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
-
-    # —— Options: one quiet row ——
-    options = ttk.Frame(outer)
-    options.grid(row=4, column=0, sticky="we", pady=(12, 0))
-
-    if not default_title.strip() and layout.look in (_DEFAULT_LOOK, _NOTE_LOOK):
-        initial_look_title = _NOTE_LOOK_TITLE
-    else:
-        initial_look_title = _look_title_for_id(layout.look)
-    look_title_var = tk.StringVar(value=initial_look_title)
-    note_size_var = tk.StringVar(value=layout.note_size)
-    copies_var = tk.StringVar(value="1")
-
-    ttk.Label(options, text="Look").pack(side=tk.LEFT)
+    ttk.Label(more, text="Look").grid(row=1, column=0, sticky="w", pady=4)
     look_combo = ttk.Combobox(
-        options,
+        more,
         textvariable=look_title_var,
         values=_look_display_names(),
         state="readonly",
-        width=12,
+        width=14,
     )
-    look_combo.pack(side=tk.LEFT, padx=(6, 14))
+    look_combo.grid(row=1, column=1, sticky="w", pady=4)
 
-    size_host = ttk.Frame(options)
-    size_host.pack(side=tk.LEFT)
-    note_size_label = ttk.Label(size_host, text="Size")
+    size_row = ttk.Frame(more)
+    size_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
+    note_size_label = ttk.Label(size_row, text="Note size")
     note_size_label.pack(side=tk.LEFT)
-    note_stepper = ttk.Frame(size_host)
-    note_stepper.pack(side=tk.LEFT, padx=(6, 0))
+    note_stepper = ttk.Frame(size_row)
+    note_stepper.pack(side=tk.LEFT, padx=(8, 0))
     size_display = tk.StringVar(
         value=_SIZE_LABELS[_normalize_size(note_size_var.get())]
     )
@@ -1432,27 +1410,29 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         side=tk.LEFT
     )
 
-    ttk.Label(options, text="Copies").pack(side=tk.LEFT, padx=(16, 0))
+    ttk.Label(more, text="Copies").grid(row=3, column=0, sticky="w", pady=4)
     copies_combo = ttk.Combobox(
-        options,
+        more,
         textvariable=copies_var,
         values=[str(n) for n in range(1, 11)],
         state="readonly",
         width=4,
     )
-    copies_combo.pack(side=tk.LEFT, padx=(6, 0))
+    copies_combo.grid(row=3, column=1, sticky="w", pady=4)
 
-    hint_var = tk.StringVar(value="")
-    hint_label = ttk.Label(outer, textvariable=hint_var, style="Hint.TLabel")
-    hint_label.grid(row=5, column=0, sticky="w", pady=(6, 0))
+    def toggle_more(*_args: object) -> None:
+        if more_open.get():
+            more.grid(row=4, column=0, sticky="we")
+        else:
+            more.grid_remove()
+        root.update_idletasks()
+        _center_window(root)
 
-    status_var = tk.StringVar(value="")
-    status_label = ttk.Label(outer, textvariable=status_var, style="Status.TLabel")
-    status_label.grid(row=6, column=0, sticky="w", pady=(4, 0))
+    more_open.trace_add("write", toggle_more)
 
-    # —— Actions: Print is the end of the journey (right) ——
+    # —— Actions ——
     actions = ttk.Frame(outer)
-    actions.grid(row=7, column=0, sticky="we", pady=(_BUTTON_GAP, 0))
+    actions.grid(row=5, column=0, sticky="we", pady=(_BUTTON_GAP, 0))
     actions.grid_columnconfigure(0, weight=1)
     session_var = tk.StringVar(value="")
     ttk.Label(actions, textvariable=session_var, style="Hint.TLabel").grid(
@@ -1487,6 +1467,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             auto_look["busy"] = False
 
     def sync_auto_look(*_args: object) -> None:
+        """Empty → Note; title or barcode → Quiet (default)."""
         if auto_look["busy"]:
             return
         has_barcode = bool(serial_var.get().strip())
@@ -1500,22 +1481,12 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     def update_mode_chrome(*_args: object) -> None:
         has_barcode = bool(serial_var.get().strip())
-        look_id = _look_id_from_title(look_title_var.get())
-        if not has_barcode:
-            mode_var.set("Note mode — text only")
-            hint_var.set("Add a barcode anytime to switch into a scannable look.")
-            note_size_label.pack(side=tk.LEFT)
-            note_stepper.pack(side=tk.LEFT, padx=(6, 0))
-        else:
-            blurb = (
-                _LOOKS[_DEFAULT_LOOK].blurb
-                if look_id == _NOTE_LOOK
-                else _LOOKS[look_id].blurb
-            )
-            mode_var.set(f"{look_title_var.get()} look")
-            hint_var.set(blurb)
+        if has_barcode:
             note_size_label.pack_forget()
             note_stepper.pack_forget()
+        else:
+            note_size_label.pack(side=tk.LEFT)
+            note_stepper.pack(side=tk.LEFT, padx=(8, 0))
 
     def apply_preview(
         request_id: int,
@@ -1582,11 +1553,12 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     def after_success(printer_name: str) -> None:
         preview_state["printed"] += 1
         n = preview_state["printed"]
-        session_var.set(f"{n} printed this session" if n > 1 else "1 printed this session")
+        session_var.set(
+            f"{n} printed" if n > 1 else "1 printed"
+        )
         status_label.configure(style="Ok.TLabel")
         status_var.set(_status_line(f"Sent to {printer_name} ✓"))
         set_printing(True)
-        # Batch rhythm: clear barcode, keep title/look, ready for next scan.
         serial_var.set("")
         root.after(50, focus_barcode)
         root.after(
@@ -1623,7 +1595,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             printer = store.selected_printer()
             if printer is None:
                 raise FileNotFoundError(
-                    "No printer configured. Click Manage… to add one."
+                    "No printer configured. Open More options → Manage…"
                 )
             status_var.set(_status_line(f"Connecting to {printer.name}…"))
             root.update_idletasks()
@@ -1631,6 +1603,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         except FileNotFoundError as exc:
             status_var.set(_status_line(str(exc)))
             set_printing(True)
+            more_open.set(True)
             if messagebox.askyesno(
                 "No printer",
                 f"{exc}\n\nOpen printer manager now?",

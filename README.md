@@ -11,7 +11,7 @@ Small Python script that sends ZPL to a Zebra printer on your network over a raw
    ```
 
 2. **Add a printer in the UI**  
-   Use **Printer → Manage…** to add a name, IP/hostname, and port (typically **9100**).  
+   Open **More options → Manage…** to add a name, IP/hostname, and port (typically **9100**).  
    Your list is saved locally in **`printer_config.json`** (gitignored — not in the repo).
 
    Optional: copy the example file first if you prefer editing JSON by hand:
@@ -26,6 +26,10 @@ Small Python script that sends ZPL to a Zebra printer on your network over a raw
 |------|-----------------|--------|
 | `printer_config.example.json` | Yes | Example multi-printer shape (dummy IP). |
 | `printer_config.json` | **No** (gitignored) | Your real printers + which one is selected. |
+
+Everyday use is just **Title**, **Barcode**, preview, and **Print**. Look, note size, copies, and printer management stay under **More options**.
+
+Default look is **Quiet**. Empty labels auto-switch to **Note** (text only).
 
 If you print with no printers saved, the app asks you to open **Manage…**.
 
