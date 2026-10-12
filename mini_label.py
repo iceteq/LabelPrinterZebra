@@ -884,10 +884,11 @@ def _build_zpl(
 
 _UI_SCALE = 2
 _PREVIEW_DEBOUNCE_MS = 350
-_PREVIEW_MAX_WIDTH = 420
-_PREVIEW_MAX_HEIGHT = 170
-_BUTTON_GAP = 8
+_PREVIEW_MAX_WIDTH = 480
+_PREVIEW_MAX_HEIGHT = 200
+_BUTTON_GAP = 10
 _STATUS_MAX_CHARS = 72
+_SUCCESS_HOLD_MS = 900
 
 
 def _status_line(message: str) -> str:
@@ -1235,20 +1236,18 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
         win.destroy()
 
     buttons = ttk.Frame(body)
-    buttons.grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
-    ttk.Button(buttons, text="New", command=on_new).pack(side=tk.LEFT)
-    ttk.Button(buttons, text="Add", command=on_add).pack(side=tk.LEFT, padx=(6, 0))
+    buttons.grid(row=6, column=0, columnspan=2, sticky="we", pady=(10, 0))
+    ttk.Button(buttons, text="Clear form", command=on_new).pack(side=tk.LEFT)
     ttk.Button(buttons, text="Save", command=on_save).pack(side=tk.LEFT, padx=(6, 0))
     ttk.Button(buttons, text="Delete", command=on_delete).pack(side=tk.LEFT, padx=(6, 0))
-    ttk.Button(buttons, text="Use selected", command=on_use).pack(
-        side=tk.LEFT, padx=(6, 0)
-    )
-    ttk.Button(buttons, text="Close", command=on_close).pack(side=tk.LEFT, padx=(12, 0))
+    ttk.Button(buttons, text="Use", command=on_use).pack(side=tk.LEFT, padx=(6, 0))
+    ttk.Button(buttons, text="Done", command=on_close).pack(side=tk.RIGHT)
 
     listbox.bind("<<ListboxSelect>>", load_selected)
+    listbox.bind("<Double-Button-1>", lambda _e: on_use())
     refresh_list()
     if not store.printers:
-        status_var.set("No printers yet — fill the fields and click Add")
+        status_var.set("No printers yet — fill the fields and click Save")
         name_entry.focus_force()
 
     win.protocol("WM_DELETE_WINDOW", on_close)
@@ -1257,6 +1256,7 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
 
 
 def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None):
+    """Print dialog: content first, big preview, quiet options, print-and-continue."""
     layout = layout or LabelLayout()
     pad = 14 * _UI_SCALE
 
@@ -1269,30 +1269,46 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     style = ttk.Style(root)
     try:
-        style.configure("Hint.TLabel", foreground="#666666")
-        style.configure("Status.TLabel", font=("Segoe UI", 8), foreground="#B00020")
-        style.configure("Warn.TLabel", font=("Segoe UI", 8), foreground="#8A6116")
-        style.configure("Ok.TLabel", font=("Segoe UI", 8), foreground="#1B5E20")
+        style.configure("Hint.TLabel", foreground="#6B6B6B")
+        style.configure("Mode.TLabel", foreground="#3D5A45")
+        style.configure("Status.TLabel", font=("Segoe UI", 9), foreground="#B00020")
+        style.configure("Warn.TLabel", font=("Segoe UI", 9), foreground="#8A6116")
+        style.configure("Ok.TLabel", font=("Segoe UI", 9), foreground="#1B5E20")
+        style.configure("Header.TLabel", foreground="#444444")
+        style.configure("Section.TLabelframe.Label", foreground="#333333")
     except tk.TclError:
         pass
 
-    frame = ttk.Frame(root, padding=pad)
-    frame.grid(row=0, column=0)
+    outer = ttk.Frame(root, padding=pad)
+    outer.grid(row=0, column=0)
+    outer.grid_columnconfigure(0, weight=1)
 
     printer_store = {"value": _load_printer_store()}
+    auto_look = {"busy": False}
+    preview_state = {
+        "photo": None,
+        "request_id": 0,
+        "after_id": None,
+        "closed": False,
+        "printed": 0,
+    }
 
-    ttk.Label(frame, text="Printer").grid(row=0, column=0, sticky="w", pady=(0, 4 * _UI_SCALE))
-    printer_row = ttk.Frame(frame)
-    printer_row.grid(row=0, column=1, sticky="we", pady=(0, 4 * _UI_SCALE))
+    # —— Header: where it prints (context, not the job) ——
+    header = ttk.Frame(outer)
+    header.grid(row=0, column=0, sticky="we")
+    header.grid_columnconfigure(1, weight=1)
+    ttk.Label(header, text="Printer", style="Header.TLabel").grid(
+        row=0, column=0, sticky="w"
+    )
     printer_var = tk.StringVar(value=printer_store["value"].selected)
     printer_combo = ttk.Combobox(
-        printer_row,
+        header,
         textvariable=printer_var,
         values=printer_store["value"].names(),
         state="readonly",
-        width=22,
+        width=20,
     )
-    printer_combo.pack(side=tk.LEFT)
+    printer_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
 
     def refresh_printer_combo(store: PrinterStore | None = None) -> None:
         store = store or _load_printer_store()
@@ -1309,9 +1325,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     def on_printer_selected(*_args: object) -> None:
         name = printer_var.get().strip()
         store = printer_store["value"]
-        if not name or name == store.selected:
-            return
-        if store.get(name) is None:
+        if not name or name == store.selected or store.get(name) is None:
             return
         store.selected = name
         _save_printer_store(store)
@@ -1319,73 +1333,137 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     def open_manager() -> None:
         _open_printer_manager(root, refresh_printer_combo)
 
-    ttk.Button(printer_row, text="Manage…", command=open_manager).pack(
-        side=tk.LEFT, padx=(8, 0)
+    ttk.Button(header, text="Manage…", command=open_manager).grid(
+        row=0, column=2, sticky="e", padx=(8, 0)
     )
     printer_combo.bind("<<ComboboxSelected>>", on_printer_selected)
 
-    ttk.Label(frame, text="Title").grid(row=1, column=0, sticky="w", pady=(0, 4 * _UI_SCALE))
+    ttk.Separator(outer, orient="horizontal").grid(
+        row=1, column=0, sticky="we", pady=(10, 12)
+    )
+
+    # —— Content: the job ——
+    content = ttk.Frame(outer)
+    content.grid(row=2, column=0, sticky="we")
+    content.grid_columnconfigure(1, weight=1)
+
+    ttk.Label(content, text="Title").grid(row=0, column=0, sticky="w")
     title_var = tk.StringVar(value=default_title)
-    title_entry = ttk.Entry(frame, textvariable=title_var, width=34)
-    title_entry.grid(row=1, column=1, sticky="we", pady=(0, 4 * _UI_SCALE))
+    title_entry = ttk.Entry(content, textvariable=title_var, width=36)
+    title_entry.grid(row=0, column=1, sticky="we", pady=(0, 2))
+    ttk.Label(
+        content, text="e.g. Act, Req, Serienummer — or a note", style="Hint.TLabel"
+    ).grid(row=1, column=1, sticky="w", pady=(0, 8))
 
-    ttk.Label(frame, text="Barcode").grid(row=2, column=0, sticky="w")
+    ttk.Label(content, text="Barcode").grid(row=2, column=0, sticky="nw", pady=(2, 0))
     serial_var = tk.StringVar()
-    serial_entry = ttk.Entry(frame, textvariable=serial_var, width=34)
-    serial_entry.grid(row=2, column=1, sticky="we")
+    serial_entry = ttk.Entry(content, textvariable=serial_var, width=36)
+    serial_entry.grid(row=2, column=1, sticky="we", pady=(0, 2))
+    ttk.Label(
+        content,
+        text="Scan or type · leave empty for a text-only note",
+        style="Hint.TLabel",
+    ).grid(row=3, column=1, sticky="w")
 
-    ttk.Label(frame, text="Look").grid(row=3, column=0, sticky="w", pady=(10 * _UI_SCALE, 0))
-    # Empty form → Note; title prefilled (hotkeys) → Scan.
+    # —— Preview: the product (truth) ——
+    preview_frame = ttk.LabelFrame(outer, text="Your label", padding=10 * _UI_SCALE)
+    preview_frame.grid(row=3, column=0, sticky="we", pady=(14, 0))
+    preview_frame.grid_columnconfigure(0, weight=1)
+    preview_frame.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
+    preview_label = ttk.Label(
+        preview_frame,
+        text="Loading preview…",
+        anchor="center",
+        justify="center",
+    )
+    preview_label.grid(row=0, column=0, sticky="n")
+    mode_var = tk.StringVar(value="")
+    mode_label = ttk.Label(preview_frame, textvariable=mode_var, style="Mode.TLabel")
+    mode_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+    # —— Options: one quiet row ——
+    options = ttk.Frame(outer)
+    options.grid(row=4, column=0, sticky="we", pady=(12, 0))
+
     if not default_title.strip() and layout.look in (_DEFAULT_LOOK, _NOTE_LOOK):
         initial_look_title = _NOTE_LOOK_TITLE
     else:
         initial_look_title = _look_title_for_id(layout.look)
     look_title_var = tk.StringVar(value=initial_look_title)
+    note_size_var = tk.StringVar(value=layout.note_size)
+    copies_var = tk.StringVar(value="1")
+
+    ttk.Label(options, text="Look").pack(side=tk.LEFT)
     look_combo = ttk.Combobox(
-        frame,
+        options,
         textvariable=look_title_var,
         values=_look_display_names(),
         state="readonly",
-        width=18,
+        width=12,
     )
-    look_combo.grid(row=3, column=1, sticky="w", pady=(10 * _UI_SCALE, 0))
+    look_combo.pack(side=tk.LEFT, padx=(6, 14))
 
-    hint_var = tk.StringVar(value="Note — text only, no barcode")
-    hint_label = ttk.Label(frame, textvariable=hint_var, style="Hint.TLabel")
-    hint_label.grid(row=4, column=1, sticky="w", pady=(2, 0))
+    size_host = ttk.Frame(options)
+    size_host.pack(side=tk.LEFT)
+    note_size_label = ttk.Label(size_host, text="Size")
+    note_size_label.pack(side=tk.LEFT)
+    note_stepper = ttk.Frame(size_host)
+    note_stepper.pack(side=tk.LEFT, padx=(6, 0))
+    size_display = tk.StringVar(
+        value=_SIZE_LABELS[_normalize_size(note_size_var.get())]
+    )
 
-    note_size_var = tk.StringVar(value=layout.note_size)
-    auto_look = {"busy": False}
-
-    def schedule_preview_proxy(*_args: object) -> None:
+    def _bump_note(delta: int) -> None:
+        note_size_var.set(_bump_size(note_size_var.get(), delta))
+        size_display.set(_SIZE_LABELS[_normalize_size(note_size_var.get())])
         schedule_preview()
 
-    note_stepper, note_size_label = _add_size_stepper(
-        frame,
-        row=5,
-        label="Note size",
-        size_var=note_size_var,
-        on_change=schedule_preview_proxy,
+    def _on_note_size_write(*_a: object) -> None:
+        size_display.set(_SIZE_LABELS[_normalize_size(note_size_var.get())])
+
+    note_size_var.trace_add("write", _on_note_size_write)
+    ttk.Button(note_stepper, text="−", width=3, command=lambda: _bump_note(-1)).pack(
+        side=tk.LEFT
+    )
+    ttk.Label(note_stepper, textvariable=size_display, width=8, anchor="center").pack(
+        side=tk.LEFT, padx=4
+    )
+    ttk.Button(note_stepper, text="+", width=3, command=lambda: _bump_note(1)).pack(
+        side=tk.LEFT
     )
 
-    copies_row = 6
-    preview_row = 7
-    ttk.Label(frame, text="Copies").grid(
-        row=copies_row, column=0, sticky="w", pady=(8 * _UI_SCALE, 0)
-    )
-    copies_var = tk.StringVar(value="1")
+    ttk.Label(options, text="Copies").pack(side=tk.LEFT, padx=(16, 0))
     copies_combo = ttk.Combobox(
-        frame,
+        options,
         textvariable=copies_var,
         values=[str(n) for n in range(1, 11)],
         state="readonly",
-        width=8,
+        width=4,
     )
-    copies_combo.grid(row=copies_row, column=1, sticky="w", pady=(8 * _UI_SCALE, 0))
-    frame.grid_rowconfigure(
-        preview_row,
-        minsize=(20 * _UI_SCALE) + (8 * _UI_SCALE) * 2 + _PREVIEW_MAX_HEIGHT,
+    copies_combo.pack(side=tk.LEFT, padx=(6, 0))
+
+    hint_var = tk.StringVar(value="")
+    hint_label = ttk.Label(outer, textvariable=hint_var, style="Hint.TLabel")
+    hint_label.grid(row=5, column=0, sticky="w", pady=(6, 0))
+
+    status_var = tk.StringVar(value="")
+    status_label = ttk.Label(outer, textvariable=status_var, style="Status.TLabel")
+    status_label.grid(row=6, column=0, sticky="w", pady=(4, 0))
+
+    # —— Actions: Print is the end of the journey (right) ——
+    actions = ttk.Frame(outer)
+    actions.grid(row=7, column=0, sticky="we", pady=(_BUTTON_GAP, 0))
+    actions.grid_columnconfigure(0, weight=1)
+    session_var = tk.StringVar(value="")
+    ttk.Label(actions, textvariable=session_var, style="Hint.TLabel").grid(
+        row=0, column=0, sticky="w"
     )
+    btn_row = ttk.Frame(actions)
+    btn_row.grid(row=0, column=1, sticky="e")
+    cancel_button = ttk.Button(btn_row, text="Close", command=lambda: on_cancel())
+    cancel_button.pack(side=tk.LEFT)
+    print_button = ttk.Button(btn_row, text="Print ↵", command=lambda: on_print())
+    print_button.pack(side=tk.LEFT, padx=(8, 0))
 
     def current_layout() -> LabelLayout:
         return LabelLayout(
@@ -1409,7 +1487,6 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             auto_look["busy"] = False
 
     def sync_auto_look(*_args: object) -> None:
-        """No barcode → Note; title added (or barcode while on Note) → Scan."""
         if auto_look["busy"]:
             return
         has_barcode = bool(serial_var.get().strip())
@@ -1425,34 +1502,20 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         has_barcode = bool(serial_var.get().strip())
         look_id = _look_id_from_title(look_title_var.get())
         if not has_barcode:
-            hint_var.set("Note — text only, no barcode")
-        elif look_id == _NOTE_LOOK:
-            hint_var.set(_LOOKS[_DEFAULT_LOOK].blurb)
+            mode_var.set("Note mode — text only")
+            hint_var.set("Add a barcode anytime to switch into a scannable look.")
+            note_size_label.pack(side=tk.LEFT)
+            note_stepper.pack(side=tk.LEFT, padx=(6, 0))
         else:
-            hint_var.set(_LOOKS[look_id].blurb)
-        # Note size only when there is no barcode.
-        if has_barcode:
-            note_size_label.grid_remove()
-            note_stepper.grid_remove()
-        else:
-            note_size_label.grid()
-            note_stepper.grid()
-
-    preview_frame = ttk.LabelFrame(frame, text="Preview", padding=8 * _UI_SCALE)
-    preview_frame.grid(
-        row=preview_row, column=0, columnspan=2, sticky="we", pady=(pad, 0)
-    )
-    preview_frame.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
-    preview_frame.grid_columnconfigure(0, weight=1)
-    preview_label = ttk.Label(
-        preview_frame,
-        text="Loading preview…",
-        anchor="center",
-        justify="center",
-    )
-    preview_label.grid(row=0, column=0, sticky="n")
-
-    preview_state = {"photo": None, "request_id": 0, "after_id": None, "closed": False}
+            blurb = (
+                _LOOKS[_DEFAULT_LOOK].blurb
+                if look_id == _NOTE_LOOK
+                else _LOOKS[look_id].blurb
+            )
+            mode_var.set(f"{look_title_var.get()} look")
+            hint_var.set(blurb)
+            note_size_label.pack_forget()
+            note_stepper.pack_forget()
 
     def apply_preview(
         request_id: int,
@@ -1474,7 +1537,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         if warnings:
             status_label.configure(style="Warn.TLabel")
             status_var.set(_status_line(" · ".join(warnings)))
-        else:
+        elif not status_var.get().startswith("Sent"):
             status_var.set("")
 
     def refresh_preview() -> None:
@@ -1505,36 +1568,41 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             root.after_cancel(after_id)
         preview_state["after_id"] = root.after(_PREVIEW_DEBOUNCE_MS, refresh_preview)
 
-    title_var.trace_add("write", schedule_preview)
-    title_var.trace_add("write", sync_auto_look)
-    serial_var.trace_add("write", schedule_preview)
-    serial_var.trace_add("write", sync_auto_look)
-    serial_var.trace_add("write", update_mode_chrome)
-    look_title_var.trace_add("write", schedule_preview)
-    look_title_var.trace_add("write", update_mode_chrome)
-    look_combo.bind("<<ComboboxSelected>>", schedule_preview)
-    note_size_var.trace_add("write", schedule_preview)
-    sync_auto_look()
-    update_mode_chrome()
-
-    status_var = tk.StringVar(value="")
-    status_label = ttk.Label(frame, textvariable=status_var, style="Status.TLabel")
-    status_label.grid(
-        row=preview_row + 1, column=0, columnspan=2, sticky="nw", pady=(4 * _UI_SCALE, 0)
-    )
-
     def set_printing(enabled: bool) -> None:
         state = ["!disabled"] if enabled else ["disabled"]
         print_button.state(state)
         cancel_button.state(state)
+        title_entry.state(["!disabled"] if enabled else ["disabled"])
+        serial_entry.state(["!disabled"] if enabled else ["disabled"])
 
-    def on_print():
+    def focus_barcode() -> None:
+        serial_entry.focus_force()
+        serial_entry.selection_range(0, tk.END)
+
+    def after_success(printer_name: str) -> None:
+        preview_state["printed"] += 1
+        n = preview_state["printed"]
+        session_var.set(f"{n} printed this session" if n > 1 else "1 printed this session")
+        status_label.configure(style="Ok.TLabel")
+        status_var.set(_status_line(f"Sent to {printer_name} ✓"))
+        set_printing(True)
+        # Batch rhythm: clear barcode, keep title/look, ready for next scan.
+        serial_var.set("")
+        root.after(50, focus_barcode)
+        root.after(
+            _SUCCESS_HOLD_MS,
+            lambda: status_var.set("")
+            if status_var.get().startswith("Sent")
+            else None,
+        )
+
+    def on_print() -> None:
         title = title_var.get().strip()
         serial = serial_var.get().strip()
         if not serial and not title:
             messagebox.showwarning(
-                "Missing value",
-                "Enter text in Title or a barcode value to print.",
+                "Nothing to print",
+                "Add a title or scan a barcode first.",
                 parent=root,
             )
             title_entry.focus_force()
@@ -1547,7 +1615,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
         set_printing(False)
         status_label.configure(style="Status.TLabel")
-        status_var.set(_status_line("Sending to printer…"))
+        status_var.set(_status_line("Sending…"))
         root.update_idletasks()
 
         try:
@@ -1557,9 +1625,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
                 raise FileNotFoundError(
                     "No printer configured. Click Manage… to add one."
                 )
-            status_var.set(
-                _status_line(f"Connecting to {printer.name} ({printer.host}:{printer.port})…")
-            )
+            status_var.set(_status_line(f"Connecting to {printer.name}…"))
             root.update_idletasks()
             _send_zpl(zpl)
         except FileNotFoundError as exc:
@@ -1578,37 +1644,38 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
                 target = f"{host}:{port}"
             except FileNotFoundError:
                 target = "printer"
+            status_label.configure(style="Status.TLabel")
             status_var.set(_status_line(f"Could not connect to {target}: {exc}"))
             set_printing(True)
-            serial_entry.focus_force()
+            focus_barcode()
             return
         except Exception as exc:
+            status_label.configure(style="Status.TLabel")
             status_var.set(_status_line(f"Print failed: {type(exc).__name__}: {exc}"))
             set_printing(True)
-            serial_entry.focus_force()
+            focus_barcode()
             return
 
+        after_success(printer.name)
+
+    def on_cancel() -> None:
         preview_state["closed"] = True
         after_id = preview_state["after_id"]
         if after_id is not None:
             root.after_cancel(after_id)
         root.destroy()
 
-    def on_cancel():
-        preview_state["closed"] = True
-        after_id = preview_state["after_id"]
-        if after_id is not None:
-            root.after_cancel(after_id)
-        root.destroy()
-
-    buttons = ttk.Frame(frame)
-    buttons.grid(
-        row=preview_row + 2, column=0, columnspan=2, sticky="w", pady=(_BUTTON_GAP, 0)
-    )
-    print_button = ttk.Button(buttons, text="Print", command=on_print)
-    print_button.pack(side=tk.LEFT)
-    cancel_button = ttk.Button(buttons, text="Cancel", command=on_cancel)
-    cancel_button.pack(side=tk.LEFT, padx=(8, 0))
+    title_var.trace_add("write", schedule_preview)
+    title_var.trace_add("write", sync_auto_look)
+    serial_var.trace_add("write", schedule_preview)
+    serial_var.trace_add("write", sync_auto_look)
+    serial_var.trace_add("write", update_mode_chrome)
+    look_title_var.trace_add("write", schedule_preview)
+    look_title_var.trace_add("write", update_mode_chrome)
+    look_combo.bind("<<ComboboxSelected>>", schedule_preview)
+    note_size_var.trace_add("write", schedule_preview)
+    sync_auto_look()
+    update_mode_chrome()
 
     for sequence in ("<Return>", "<KP_Enter>"):
         root.bind(sequence, lambda _event: on_print())
@@ -1617,11 +1684,11 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     root.bind("<Escape>", lambda _event: on_cancel())
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
-    def focus_initial_entry():
+    def focus_initial_entry() -> None:
         root.lift()
         root.attributes("-topmost", True)
         if default_title.strip():
-            serial_entry.focus_force()
+            focus_barcode()
         else:
             title_entry.focus_force()
 
