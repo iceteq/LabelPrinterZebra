@@ -206,10 +206,11 @@ _WIDE_CHARS = set("mw@%")
 _H_ALIGN = {"left": "L", "center": "C", "right": "R"}
 _SIZE_STEPS = ("small", "medium", "large")
 _SIZE_LABELS = {"small": "Small", "medium": "Medium", "large": "Large"}
+# Larger defaults — fit-to-box shrinks when content needs it.
 _NOTE_SIZE = {
-    "small": (32, 30),
-    "medium": (44, 40),
-    "large": (58, 52),
+    "small": (44, 40),
+    "medium": (62, 56),
+    "large": (84, 74),
 }
 
 
@@ -244,6 +245,7 @@ class LookRecipe:
 
 
 # Tuned for 4×2: clear hierarchy, tight barcode↔caption grouping, calm margins.
+# Type sizes are intentionally bold; fit-to-box shrinks when needed.
 _LOOKS: dict[str, LookRecipe] = {
     "scan": LookRecipe(
         look_id="scan",
@@ -252,12 +254,12 @@ _LOOKS: dict[str, LookRecipe] = {
         align="left",
         valign="top",
         stack="vertical",
-        title_h=28,
-        title_w=26,
-        bar_h=158,
+        title_h=40,
+        title_w=36,
+        bar_h=168,
         module_pref=3,
-        caption_h=26,
-        caption_w=22,
+        caption_h=36,
+        caption_w=30,
         bar_fill=0.62,
     ),
     "read_id": LookRecipe(
@@ -267,12 +269,12 @@ _LOOKS: dict[str, LookRecipe] = {
         align="left",
         valign="top",
         stack="vertical",
-        title_h=26,
-        title_w=24,
-        bar_h=108,
+        title_h=36,
+        title_w=32,
+        bar_h=120,
         module_pref=3,
-        caption_h=42,
-        caption_w=34,
+        caption_h=56,
+        caption_w=46,
         bar_fill=0.55,
     ),
     "label": LookRecipe(
@@ -282,12 +284,12 @@ _LOOKS: dict[str, LookRecipe] = {
         align="center",
         valign="middle",
         stack="vertical",
-        title_h=60,
-        title_w=52,
-        bar_h=132,
+        title_h=80,
+        title_w=70,
+        bar_h=145,
         module_pref=3,
-        caption_h=18,
-        caption_w=14,
+        caption_h=26,
+        caption_w=20,
         bar_fill=0.58,
     ),
     "quiet": LookRecipe(
@@ -297,12 +299,12 @@ _LOOKS: dict[str, LookRecipe] = {
         align="left",
         valign="top",
         stack="vertical",
-        title_h=36,
-        title_w=32,
-        bar_h=112,
+        title_h=48,
+        title_w=42,
+        bar_h=125,
         module_pref=2,
-        caption_h=18,
-        caption_w=14,
+        caption_h=26,
+        caption_w=20,
         bar_fill=0.70,
     ),
     "side": LookRecipe(
@@ -312,18 +314,20 @@ _LOOKS: dict[str, LookRecipe] = {
         align="left",
         valign="middle",
         stack="side",
-        title_h=38,
-        title_w=34,
-        bar_h=128,
+        title_h=52,
+        title_w=46,
+        bar_h=145,
         module_pref=3,
-        caption_h=24,
-        caption_w=20,
+        caption_h=34,
+        caption_w=28,
         bar_fill=0.55,
     ),
 }
 
 _LOOK_ORDER = ("scan", "read_id", "label", "quiet", "side")
 _DEFAULT_LOOK = "scan"
+_NOTE_LOOK = "note"
+_NOTE_LOOK_TITLE = "Note"
 
 
 def _normalize_look(value: str) -> str:
@@ -334,10 +338,13 @@ def _normalize_look(value: str) -> str:
         "side_title": "side",
         "sidetitle": "side",
         "default": "scan",
+        "note": _NOTE_LOOK,
     }
     key = aliases.get(key, key)
+    if key == _NOTE_LOOK:
+        return _NOTE_LOOK
     if key not in _LOOKS:
-        raise ValueError(f"look must be one of {list(_LOOK_ORDER)}")
+        raise ValueError(f"look must be one of {list(_LOOK_ORDER) + [_NOTE_LOOK]}")
     return key
 
 
@@ -364,6 +371,9 @@ class LabelLayout:
 
     @property
     def recipe(self) -> LookRecipe:
+        # Note is UI/mode only; barcode recipes fall back to Scan if needed.
+        if self.look == _NOTE_LOOK:
+            return _LOOKS[_DEFAULT_LOOK]
         return _LOOKS[self.look]
 
 
@@ -383,9 +393,9 @@ def _text_width_dots(text: str, font_h: int) -> float:
     return sum(_char_width_dots(ch, font_h) for ch in text)
 
 
-_MIN_TITLE_H = 18
-_MIN_CAPTION_H = 14
-_MIN_NOTE_H = 20
+_MIN_TITLE_H = 22
+_MIN_CAPTION_H = 16
+_MIN_NOTE_H = 28
 _MIN_BAR_H = 48
 
 
@@ -854,7 +864,9 @@ def _compose_label(
     quantity = max(1, min(10, int(copies)))
     if not serial.strip():
         return _build_note_zpl(title, layout, copies=quantity)
-    recipe = layout.recipe
+    # Note look with a barcode value → print as Scan (UI normally auto-switches).
+    look = _DEFAULT_LOOK if layout.look == _NOTE_LOOK else layout.look
+    recipe = _LOOKS[look]
     if recipe.stack == "side":
         return _build_side_zpl(title, serial.strip(), recipe, copies=quantity)
     return _build_stack_zpl(title, serial.strip(), recipe, copies=quantity)
@@ -993,7 +1005,7 @@ def _parse_args():
     )
     parser.add_argument(
         "--look",
-        choices=_LOOK_ORDER,
+        choices=[*_LOOK_ORDER, _NOTE_LOOK],
         default=_DEFAULT_LOOK,
         help="Label look / visual recipe",
     )
@@ -1039,14 +1051,22 @@ def _add_size_stepper(
 
 
 def _look_display_names() -> list[str]:
-    return [_LOOKS[k].title for k in _LOOK_ORDER]
+    return [_LOOKS[k].title for k in _LOOK_ORDER] + [_NOTE_LOOK_TITLE]
 
 
 def _look_id_from_title(title: str) -> str:
+    if title.strip() == _NOTE_LOOK_TITLE:
+        return _NOTE_LOOK
     for key in _LOOK_ORDER:
         if _LOOKS[key].title == title:
             return key
     return _DEFAULT_LOOK
+
+
+def _look_title_for_id(look_id: str) -> str:
+    if look_id == _NOTE_LOOK:
+        return _NOTE_LOOK_TITLE
+    return _LOOKS.get(look_id, _LOOKS[_DEFAULT_LOOK]).title
 
 
 def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
@@ -1315,7 +1335,12 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     serial_entry.grid(row=2, column=1, sticky="we")
 
     ttk.Label(frame, text="Look").grid(row=3, column=0, sticky="w", pady=(10 * _UI_SCALE, 0))
-    look_title_var = tk.StringVar(value=layout.recipe.title)
+    # Empty form → Note; title prefilled (hotkeys) → Scan.
+    if not default_title.strip() and layout.look in (_DEFAULT_LOOK, _NOTE_LOOK):
+        initial_look_title = _NOTE_LOOK_TITLE
+    else:
+        initial_look_title = _look_title_for_id(layout.look)
+    look_title_var = tk.StringVar(value=initial_look_title)
     look_combo = ttk.Combobox(
         frame,
         textvariable=look_title_var,
@@ -1325,11 +1350,12 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     )
     look_combo.grid(row=3, column=1, sticky="w", pady=(10 * _UI_SCALE, 0))
 
-    hint_var = tk.StringVar(value=layout.recipe.blurb)
+    hint_var = tk.StringVar(value="Note — text only, no barcode")
     hint_label = ttk.Label(frame, textvariable=hint_var, style="Hint.TLabel")
     hint_label.grid(row=4, column=1, sticky="w", pady=(2, 0))
 
     note_size_var = tk.StringVar(value=layout.note_size)
+    auto_look = {"busy": False}
 
     def schedule_preview_proxy(*_args: object) -> None:
         schedule_preview()
@@ -1373,10 +1399,37 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         except ValueError:
             return 1
 
+    def set_look_title(title: str) -> None:
+        if look_title_var.get() == title:
+            return
+        auto_look["busy"] = True
+        try:
+            look_title_var.set(title)
+        finally:
+            auto_look["busy"] = False
+
+    def sync_auto_look(*_args: object) -> None:
+        """No barcode → Note; title added (or barcode while on Note) → Scan."""
+        if auto_look["busy"]:
+            return
+        has_barcode = bool(serial_var.get().strip())
+        has_title = bool(title_var.get().strip())
+        current = look_title_var.get()
+        if not has_barcode:
+            desired = _NOTE_LOOK_TITLE if not has_title else _LOOKS[_DEFAULT_LOOK].title
+            set_look_title(desired)
+        elif current == _NOTE_LOOK_TITLE:
+            set_look_title(_LOOKS[_DEFAULT_LOOK].title)
+
     def update_mode_chrome(*_args: object) -> None:
         has_barcode = bool(serial_var.get().strip())
         look_id = _look_id_from_title(look_title_var.get())
-        hint_var.set(_LOOKS[look_id].blurb if has_barcode else "Note — text only, no barcode")
+        if not has_barcode:
+            hint_var.set("Note — text only, no barcode")
+        elif look_id == _NOTE_LOOK:
+            hint_var.set(_LOOKS[_DEFAULT_LOOK].blurb)
+        else:
+            hint_var.set(_LOOKS[look_id].blurb)
         # Note size only when there is no barcode.
         if has_barcode:
             note_size_label.grid_remove()
@@ -1453,12 +1506,15 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         preview_state["after_id"] = root.after(_PREVIEW_DEBOUNCE_MS, refresh_preview)
 
     title_var.trace_add("write", schedule_preview)
+    title_var.trace_add("write", sync_auto_look)
     serial_var.trace_add("write", schedule_preview)
+    serial_var.trace_add("write", sync_auto_look)
     serial_var.trace_add("write", update_mode_chrome)
     look_title_var.trace_add("write", schedule_preview)
     look_title_var.trace_add("write", update_mode_chrome)
     look_combo.bind("<<ComboboxSelected>>", schedule_preview)
     note_size_var.trace_add("write", schedule_preview)
+    sync_auto_look()
     update_mode_chrome()
 
     status_var = tk.StringVar(value="")
