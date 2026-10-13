@@ -924,9 +924,6 @@ _PREVIEW_MAX_HEIGHT = 220
 _BUTTON_GAP = 14
 _STATUS_MAX_CHARS = 72
 _SUCCESS_HOLD_MS = 1100
-_FADE_STEPS = 10
-_FADE_MS = 18
-
 # Calm workshop palette — cool mist + deep slate ink + quiet teal.
 # Psychology: soft ground lowers arousal; high-contrast type aids scanning;
 # teal CTA signals “go” without alarm (unlike red) or SaaS-purple cliché.
@@ -1063,22 +1060,17 @@ def _png_to_preview_image(
     )
 
 
-def _fade_in(window: tk.Misc, *, steps: int = _FADE_STEPS, ms: int = _FADE_MS) -> None:
-    """Gentle appear — reduces startle when the dialog pops over work."""
+def _ensure_window_opaque(window: tk.Misc) -> None:
+    """Force a fully visible window.
+
+    An earlier fade-in set -alpha to 0 first; on Windows/CustomTkinter that
+    often left the dialog permanently invisible if the fade callbacks never
+    completed. Always pin opacity to fully opaque when showing.
+    """
     try:
-        window.attributes("-alpha", 0.0)
+        window.attributes("-alpha", 1.0)
     except tk.TclError:
-        return
-
-    def step(i: int = 0) -> None:
-        try:
-            window.attributes("-alpha", min(1.0, (i + 1) / steps))
-        except tk.TclError:
-            return
-        if i + 1 < steps:
-            window.after(ms, lambda: step(i + 1))
-
-    window.after(ms, step)
+        pass
 
 
 def _preview_label(
@@ -1515,7 +1507,7 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
     win.protocol("WM_DELETE_WINDOW", on_close)
     win.update_idletasks()
     _center_window(win)
-    _fade_in(win)
+    _ensure_window_opaque(win)
     win.grab_set()
     parent.wait_window(win)
 
@@ -1525,19 +1517,24 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     layout = layout or LabelLayout()
     t = _THEME
 
-    root = ctk.CTk()
-    root.withdraw()
-    ui_font, mono_font = _apply_app_theme()
-    # CTk has its own DPI handling; keep a mild bump instead of 2× tk scaling.
+    # Scaling must be set before the first CTk window is created.
     try:
         ctk.set_widget_scaling(1.15 if _UI_SCALE >= 2 else 1.0)
         ctk.set_window_scaling(1.15 if _UI_SCALE >= 2 else 1.0)
     except Exception:
         pass
+
+    root = ctk.CTk()
+    root.withdraw()
+    ui_font, mono_font = _apply_app_theme()
     root.title("Print label")
     root.resizable(False, False)
-    root.attributes("-topmost", True)
     root.configure(fg_color=t["bg"])
+    _ensure_window_opaque(root)
+    try:
+        root.attributes("-topmost", True)
+    except tk.TclError:
+        pass
 
     dialog_width = 600
 
@@ -2226,18 +2223,25 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
     def focus_initial_entry() -> None:
-        root.lift()
-        root.attributes("-topmost", True)
+        _ensure_window_opaque(root)
+        try:
+            root.lift()
+            root.focus_force()
+            root.attributes("-topmost", True)
+        except tk.TclError:
+            pass
         if default_title.strip():
             focus_barcode()
         else:
             title_entry.focus_force()
 
     _fit_window()
-    _fade_in(root)
+    _ensure_window_opaque(root)
     schedule_preview()
     root.after(0, focus_initial_entry)
     root.after(120, focus_initial_entry)
+    # Safety net: if anything left the window transparent, force it visible.
+    root.after(300, lambda: _ensure_window_opaque(root))
     root.mainloop()
 
 
