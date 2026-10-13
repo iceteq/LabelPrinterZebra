@@ -208,14 +208,39 @@ _NARROW_CHARS = set("iltrfjI.:;,!|'\"`")
 _WIDE_CHARS = set("mw@%")
 
 _H_ALIGN = {"left": "L", "center": "C", "right": "R"}
-_SIZE_STEPS = ("small", "medium", "large")
-_SIZE_LABELS = {"small": "Small", "medium": "Medium", "large": "Large"}
-# Larger defaults — fit-to-box shrinks when content needs it.
-_NOTE_SIZE = {
-    "small": (44, 40),
-    "medium": (62, 56),
-    "large": (84, 74),
+_SIZE_STEPS = ("small", "medium", "large", "xl", "xxl")
+_SIZE_LABELS = {
+    "small": "Small",
+    "medium": "Medium",
+    "large": "Large",
+    "xl": "XL",
+    "xxl": "XXL",
 }
+# Note-only sizes — fit-to-box shrinks when content needs it.
+_NOTE_SIZE = {
+    "small": (52, 46),
+    "medium": (72, 64),
+    "large": (96, 84),
+    "xl": (124, 108),
+    "xxl": (156, 136),
+}
+# Note placement presets: (horizontal, vertical).
+_NOTE_ALIGN_STEPS = ("left", "right", "top", "bottom", "center")
+_NOTE_ALIGN_LABELS = {
+    "left": "Left",
+    "right": "Right",
+    "top": "Top",
+    "bottom": "Bottom",
+    "center": "Center",
+}
+_NOTE_ALIGN = {
+    "left": ("left", "middle"),
+    "right": ("right", "middle"),
+    "top": ("center", "top"),
+    "bottom": ("center", "bottom"),
+    "center": ("center", "middle"),
+}
+_DEFAULT_NOTE_ALIGN = "center"
 
 
 def _label_dots(width_in: float, height_in: float, dpmm: int) -> tuple[int, int]:
@@ -345,6 +370,22 @@ def _normalize_size(value: str) -> str:
     return key
 
 
+def _normalize_note_align(value: str) -> str:
+    key = str(value).strip().lower()
+    aliases = {
+        "middle": "center",
+        "c": "center",
+        "l": "left",
+        "r": "right",
+        "t": "top",
+        "b": "bottom",
+    }
+    key = aliases.get(key, key)
+    if key not in _NOTE_ALIGN:
+        raise ValueError(f"note align must be one of {list(_NOTE_ALIGN_STEPS)}")
+    return key
+
+
 def _bump_size(current: str, delta: int) -> str:
     idx = _SIZE_STEPS.index(_normalize_size(current))
     return _SIZE_STEPS[max(0, min(len(_SIZE_STEPS) - 1, idx + delta))]
@@ -354,10 +395,12 @@ def _bump_size(current: str, delta: int) -> str:
 class LabelLayout:
     look: str = _DEFAULT_LOOK
     note_size: str = "medium"
+    note_align: str = _DEFAULT_NOTE_ALIGN
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "look", _normalize_look(self.look))
         object.__setattr__(self, "note_size", _normalize_size(self.note_size))
+        object.__setattr__(self, "note_align", _normalize_note_align(self.note_align))
 
     @property
     def recipe(self) -> LookRecipe:
@@ -591,7 +634,8 @@ def _content_bottom(margin: int) -> int:
 
 def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildResult:
     prefer_h, prefer_w = _NOTE_SIZE[layout.note_size]
-    margin = _adaptive_margin(prefer_h >= 50)
+    h_align, v_align = _NOTE_ALIGN[layout.note_align]
+    margin = _adaptive_margin(prefer_h >= 72)
     bottom = _content_bottom(margin)
     block_w = _LABEL_WIDTH - 2 * margin
     available = max(prefer_h, bottom - margin)
@@ -609,13 +653,14 @@ def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildRes
         max_lines,
         _estimate_wrapped_lines(fitted.text, fitted.font_h, float(block_w)),
     )
-    block_h = est_lines * fitted.font_h
-    if est_lines <= 2:
-        y = margin + max(0, (bottom - margin - block_h) // 2)
-        align = "center"
-    else:
+    block_h = est_lines * (fitted.font_h + 4) - 4
+    content_h = max(0, bottom - margin)
+    if v_align == "top":
         y = margin
-        align = "left"
+    elif v_align == "bottom":
+        y = max(margin, bottom - block_h)
+    else:
+        y = margin + max(0, (content_h - block_h) // 2)
     warnings: list[str] = []
     if fitted.shrunk:
         warnings.append("Note text shrunk to fit")
@@ -627,7 +672,7 @@ def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildRes
             fitted.text,
             fitted.font_h,
             fitted.font_w,
-            align,
+            h_align,
             block_w,
             max_lines=max_lines,
         )
@@ -1098,6 +1143,8 @@ def _center_window(
     width = max(width or window.winfo_reqwidth(), min_width)
     height = height or window.winfo_reqheight()
     area_x, area_y, area_w, area_h = _work_area_origin_and_size(window)
+    width = min(width, max(320, area_w - 24))
+    height = min(height, max(480, area_h - 24))
     x = area_x + max(0, (area_w - width) // 2)
     y = area_y + max(0, (area_h - height) // 2)
     # CTk.geometry() re-applies window scaling; winfo_* is already in pixels.
@@ -1127,6 +1174,12 @@ def _parse_args():
         choices=_SIZE_STEPS,
         default="medium",
         help="Note text size when printing without a barcode",
+    )
+    parser.add_argument(
+        "--note-align",
+        choices=_NOTE_ALIGN_STEPS,
+        default=_DEFAULT_NOTE_ALIGN,
+        help="Note text alignment when printing without a barcode",
     )
     return parser.parse_args()
 
@@ -1202,13 +1255,13 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
     ctk.CTkLabel(
         body,
         text="Printers",
-        font=ctk.CTkFont(family=ui_font, size=18, weight="bold"),
+        font=ctk.CTkFont(family=ui_font, size=22, weight="bold"),
         text_color=t["ink"],
     ).grid(row=0, column=0, columnspan=2, sticky="w", padx=18, pady=(16, 2))
     ctk.CTkLabel(
         body,
         text="Saved on this computer only",
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         text_color=t["muted"],
     ).grid(row=1, column=0, columnspan=2, sticky="w", padx=18, pady=(0, 10))
 
@@ -1234,7 +1287,7 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
         ctk.CTkLabel(
             body,
             text=text,
-            font=ctk.CTkFont(family=ui_font, size=12),
+            font=ctk.CTkFont(family=ui_font, size=14),
             text_color=t["muted"],
         ).grid(row=row, column=0, sticky="w", padx=(18, 10), pady=5)
 
@@ -1248,12 +1301,12 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
         body,
         textvariable=name_var,
         width=260,
-        height=34,
+        height=40,
         corner_radius=8,
         border_color=t["line"],
         fg_color=t["white"],
         text_color=t["ink"],
-        font=ctk.CTkFont(family=ui_font, size=13),
+        font=ctk.CTkFont(family=ui_font, size=15),
     )
     name_entry.grid(row=3, column=1, sticky="we", padx=(0, 18), pady=5)
 
@@ -1262,12 +1315,12 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
         body,
         textvariable=host_var,
         width=260,
-        height=34,
+        height=40,
         corner_radius=8,
         border_color=t["line"],
         fg_color=t["white"],
         text_color=t["ink"],
-        font=ctk.CTkFont(family=ui_font, size=13),
+        font=ctk.CTkFont(family=ui_font, size=15),
     )
     host_entry.grid(row=4, column=1, sticky="we", padx=(0, 18), pady=5)
 
@@ -1276,19 +1329,19 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
         body,
         textvariable=port_var,
         width=100,
-        height=34,
+        height=40,
         corner_radius=8,
         border_color=t["line"],
         fg_color=t["white"],
         text_color=t["ink"],
-        font=ctk.CTkFont(family=ui_font, size=13),
+        font=ctk.CTkFont(family=ui_font, size=15),
     )
     port_entry.grid(row=5, column=1, sticky="w", padx=(0, 18), pady=5)
 
     status_label = ctk.CTkLabel(
         body,
         textvariable=status_var,
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         text_color=t["muted"],
         anchor="w",
     )
@@ -1399,7 +1452,7 @@ def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
     btn_kwargs = {
         "height": 32,
         "corner_radius": 8,
-        "font": ctk.CTkFont(family=ui_font, size=12),
+        "font": ctk.CTkFont(family=ui_font, size=14),
     }
     ctk.CTkButton(
         buttons,
@@ -1486,7 +1539,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     root.attributes("-topmost", True)
     root.configure(fg_color=t["bg"])
 
-    dialog_width = 520
+    dialog_width = 600
 
     outer = ctk.CTkFrame(root, fg_color=t["bg"], corner_radius=0, width=dialog_width)
     outer.grid(row=0, column=0, sticky="nsew")
@@ -1509,14 +1562,14 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     ctk.CTkLabel(
         card,
         text="Label",
-        font=ctk.CTkFont(family=ui_font, size=22, weight="bold"),
+        font=ctk.CTkFont(family=ui_font, size=26, weight="bold"),
         text_color=t["ink"],
         anchor="w",
     ).grid(row=0, column=0, sticky="w", padx=22, pady=(18, 0))
     ctk.CTkLabel(
         card,
         text="What you see is what prints",
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         text_color=t["muted"],
         anchor="w",
     ).grid(row=1, column=0, sticky="w", padx=22, pady=(2, 14))
@@ -1539,7 +1592,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     ctk.CTkLabel(
         content,
         text="Title",
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         text_color=t["muted"],
         anchor="w",
     ).grid(row=0, column=0, sticky="w")
@@ -1549,21 +1602,21 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         content,
         textvariable=title_var,
         width=field_width,
-        height=38,
+        height=44,
         corner_radius=10,
         border_width=1,
         border_color=t["line"],
         fg_color=t["white"],
         text_color=t["ink"],
         placeholder_text="Act, Req, Serienummer…",
-        font=ctk.CTkFont(family=ui_font, size=14),
+        font=ctk.CTkFont(family=ui_font, size=17),
     )
     title_entry.grid(row=1, column=0, sticky="we", pady=(4, 12))
 
     ctk.CTkLabel(
         content,
         text="Barcode",
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         text_color=t["muted"],
         anchor="w",
     ).grid(row=2, column=0, sticky="w")
@@ -1572,14 +1625,14 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         content,
         textvariable=serial_var,
         width=field_width,
-        height=38,
+        height=44,
         corner_radius=10,
         border_width=1,
         border_color=t["line"],
         fg_color=t["white"],
         text_color=t["ink"],
         placeholder_text="Scan or type · empty = note",
-        font=ctk.CTkFont(family=mono_font, size=14),
+        font=ctk.CTkFont(family=mono_font, size=17),
     )
     serial_entry.grid(row=3, column=0, sticky="we", pady=(4, 0))
 
@@ -1596,7 +1649,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     preview_label = ctk.CTkLabel(
         stage,
         text="Preparing preview…",
-        font=ctk.CTkFont(family=ui_font, size=13),
+        font=ctk.CTkFont(family=ui_font, size=15),
         text_color=t["muted"],
         anchor="center",
     )
@@ -1606,7 +1659,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     status_label = ctk.CTkLabel(
         card,
         textvariable=status_var,
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         text_color=t["danger"],
         anchor="w",
     )
@@ -1620,9 +1673,9 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         fg_color="transparent",
         hover_color=t["bg"],
         text_color=t["muted"],
-        height=28,
+        height=34,
         anchor="w",
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
     )
     more_toggle.grid(row=5, column=0, sticky="w", padx=18, pady=(8, 0))
 
@@ -1635,6 +1688,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         initial_look_title = _look_title_for_id(layout.look)
     look_title_var = tk.StringVar(value=initial_look_title)
     note_size_var = tk.StringVar(value=layout.note_size)
+    note_align_var = tk.StringVar(value=layout.note_align)
+    # Always start at 1 — never carry over the last print quantity.
     copies_var = tk.StringVar(value="1")
     printer_var = tk.StringVar(value=printer_store["value"].selected)
 
@@ -1642,7 +1697,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         ctk.CTkLabel(
             more,
             text=text,
-            font=ctk.CTkFont(family=ui_font, size=12),
+            font=ctk.CTkFont(family=ui_font, size=14),
             text_color=t["muted"],
         ).grid(row=row, column=0, sticky="w", padx=(14, 12), pady=8)
 
@@ -1654,7 +1709,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         variable=printer_var,
         values=printer_store["value"].names() or [""],
         width=180,
-        height=32,
+        height=36,
         corner_radius=8,
         border_color=t["line"],
         fg_color=t["white"],
@@ -1663,7 +1718,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         dropdown_fg_color=t["white"],
         dropdown_hover_color=t["bg"],
         text_color=t["ink"],
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         state="readonly",
     )
     printer_combo.pack(side=tk.LEFT)
@@ -1696,24 +1751,30 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         text="Manage…",
         command=open_manager,
         width=88,
-        height=32,
+        height=36,
         corner_radius=8,
         fg_color=t["surface"],
         hover_color=t["line"],
         text_color=t["ink"],
         border_width=1,
         border_color=t["line"],
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
     ).pack(side=tk.LEFT, padx=(8, 0))
     printer_combo.configure(command=on_printer_selected)
 
-    more_label(1, "Look")
+    look_label = ctk.CTkLabel(
+        more,
+        text="Look",
+        font=ctk.CTkFont(family=ui_font, size=14),
+        text_color=t["muted"],
+    )
+    look_label.grid(row=1, column=0, sticky="w", padx=(14, 12), pady=8)
     look_combo = ctk.CTkComboBox(
         more,
         variable=look_title_var,
         values=_look_display_names(),
         width=160,
-        height=32,
+        height=36,
         corner_radius=8,
         border_color=t["line"],
         fg_color=t["white"],
@@ -1722,7 +1783,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         dropdown_fg_color=t["white"],
         dropdown_hover_color=t["bg"],
         text_color=t["ink"],
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         state="readonly",
         command=lambda _v: schedule_preview(),
     )
@@ -1733,7 +1794,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     note_size_label = ctk.CTkLabel(
         size_row,
         text="Note size",
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         text_color=t["muted"],
     )
     note_size_label.pack(side=tk.LEFT)
@@ -1751,15 +1812,15 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     note_size_var.trace_add("write", _on_note_size_write)
     step_btn = {
-        "width": 34,
-        "height": 30,
+        "width": 36,
+        "height": 34,
         "corner_radius": 8,
         "fg_color": t["surface"],
         "hover_color": t["line"],
         "text_color": t["ink"],
         "border_width": 1,
         "border_color": t["line"],
-        "font": ctk.CTkFont(family=ui_font, size=14),
+        "font": ctk.CTkFont(family=ui_font, size=17),
     }
     ctk.CTkButton(note_stepper, text="−", command=lambda: _bump_note(-1), **step_btn).pack(
         side=tk.LEFT
@@ -1767,21 +1828,71 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     ctk.CTkLabel(
         note_stepper,
         textvariable=size_display,
-        width=70,
-        font=ctk.CTkFont(family=ui_font, size=12),
+        width=84,
+        font=ctk.CTkFont(family=ui_font, size=14),
         text_color=t["ink"],
     ).pack(side=tk.LEFT, padx=6)
     ctk.CTkButton(note_stepper, text="+", command=lambda: _bump_note(1), **step_btn).pack(
         side=tk.LEFT
     )
 
-    more_label(3, "Copies")
+    align_row = ctk.CTkFrame(more, fg_color="transparent")
+    align_row.grid(row=3, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 8))
+    ctk.CTkLabel(
+        align_row,
+        text="Align",
+        font=ctk.CTkFont(family=ui_font, size=14),
+        text_color=t["muted"],
+    ).pack(side=tk.LEFT)
+    align_btns: dict[str, ctk.CTkButton] = {}
+
+    def _paint_align_buttons() -> None:
+        current = _normalize_note_align(note_align_var.get())
+        for key, btn in align_btns.items():
+            if key == current:
+                btn.configure(
+                    fg_color=t["accent"],
+                    hover_color=t["accent_hover"],
+                    text_color=t["white"],
+                    border_width=0,
+                )
+            else:
+                btn.configure(
+                    fg_color=t["surface"],
+                    hover_color=t["line"],
+                    text_color=t["ink"],
+                    border_width=1,
+                    border_color=t["line"],
+                )
+
+    def _set_note_align(value: str) -> None:
+        note_align_var.set(_normalize_note_align(value))
+        _paint_align_buttons()
+        schedule_preview()
+
+    align_host = ctk.CTkFrame(align_row, fg_color="transparent")
+    align_host.pack(side=tk.LEFT, padx=(10, 0))
+    for key in _NOTE_ALIGN_STEPS:
+        btn = ctk.CTkButton(
+            align_host,
+            text=_NOTE_ALIGN_LABELS[key],
+            width=72,
+            height=34,
+            corner_radius=8,
+            font=ctk.CTkFont(family=ui_font, size=13),
+            command=lambda k=key: _set_note_align(k),
+        )
+        btn.pack(side=tk.LEFT, padx=(0, 6))
+        align_btns[key] = btn
+    _paint_align_buttons()
+
+    more_label(4, "Copies")
     copies_combo = ctk.CTkComboBox(
         more,
         variable=copies_var,
         values=[str(n) for n in range(1, 11)],
         width=80,
-        height=32,
+        height=36,
         corner_radius=8,
         border_color=t["line"],
         fg_color=t["white"],
@@ -1790,16 +1901,24 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         dropdown_fg_color=t["white"],
         dropdown_hover_color=t["bg"],
         text_color=t["ink"],
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         state="readonly",
     )
-    copies_combo.grid(row=3, column=1, sticky="w", pady=8)
+    copies_combo.grid(row=4, column=1, sticky="w", pady=8)
+
+    layout_metrics = {"base_h": None}
 
     def _fit_window() -> None:
         root.update_idletasks()
         card.update_idletasks()
-        # Card reqheight already includes the More panel when it is mapped.
-        needed_h = max(card.winfo_reqheight() + 36, 640)
+        if not more_open.get():
+            layout_metrics["base_h"] = max(card.winfo_reqheight() + 40, 720)
+            needed_h = layout_metrics["base_h"]
+        else:
+            more.update_idletasks()
+            base = layout_metrics["base_h"] or max(card.winfo_reqheight() + 40, 720)
+            # More panel sits between toggle and actions — add its height explicitly.
+            needed_h = base + max(more.winfo_reqheight(), 240) + 12
         needed_w = max(dialog_width, card.winfo_reqwidth() + 32)
         _center_window(root, width=needed_w, height=needed_h, min_width=dialog_width)
 
@@ -1810,7 +1929,9 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         else:
             more.grid_remove()
             more_toggle.configure(text="More options  ▾")
-        root.after_idle(_fit_window)
+        root.update_idletasks()
+        _fit_window()
+        root.after(40, _fit_window)
 
     more_open.trace_add("write", toggle_more)
 
@@ -1821,7 +1942,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     ctk.CTkLabel(
         actions,
         textvariable=session_var,
-        font=ctk.CTkFont(family=ui_font, size=12),
+        font=ctk.CTkFont(family=ui_font, size=14),
         text_color=t["muted"],
         anchor="w",
     ).grid(row=0, column=0, sticky="w")
@@ -1831,28 +1952,28 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         btn_row,
         text="Close",
         command=lambda: on_cancel(),
-        width=96,
-        height=38,
+        width=108,
+        height=44,
         corner_radius=10,
         fg_color=t["bg"],
         hover_color=t["line"],
         text_color=t["ink"],
         border_width=1,
         border_color=t["line"],
-        font=ctk.CTkFont(family=ui_font, size=13),
+        font=ctk.CTkFont(family=ui_font, size=15),
     )
     cancel_button.pack(side=tk.LEFT)
     print_button = ctk.CTkButton(
         btn_row,
         text="Print  ↵",
         command=lambda: on_print(),
-        width=120,
-        height=38,
+        width=132,
+        height=44,
         corner_radius=10,
         fg_color=t["accent"],
         hover_color=t["accent_hover"],
         text_color=t["white"],
-        font=ctk.CTkFont(family=ui_font, size=14, weight="bold"),
+        font=ctk.CTkFont(family=ui_font, size=17, weight="bold"),
     )
     print_button.pack(side=tk.LEFT, padx=(10, 0))
 
@@ -1860,6 +1981,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         return LabelLayout(
             look=_look_id_from_title(look_title_var.get()),
             note_size=note_size_var.get(),
+            note_align=note_align_var.get(),
         )
 
     def current_copies() -> int:
@@ -1867,6 +1989,13 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             return max(1, min(10, int(copies_var.get())))
         except ValueError:
             return 1
+
+    def reset_copies() -> None:
+        copies_var.set("1")
+        try:
+            copies_combo.set("1")
+        except tk.TclError:
+            pass
 
     def set_look_title(title: str) -> None:
         if look_title_var.get() == title:
@@ -1879,15 +2008,13 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             auto_look["busy"] = False
 
     def sync_auto_look(*_args: object) -> None:
-        """Empty → Note; title or barcode → Quiet (default)."""
+        """No barcode → Note (locked); barcode → Quiet when leaving Note."""
         if auto_look["busy"]:
             return
         has_barcode = bool(serial_var.get().strip())
-        has_title = bool(title_var.get().strip())
         current = look_title_var.get()
         if not has_barcode:
-            desired = _NOTE_LOOK_TITLE if not has_title else _LOOKS[_DEFAULT_LOOK].title
-            set_look_title(desired)
+            set_look_title(_NOTE_LOOK_TITLE)
         elif current == _NOTE_LOOK_TITLE:
             set_look_title(_LOOKS[_DEFAULT_LOOK].title)
 
@@ -1895,8 +2022,15 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         has_barcode = bool(serial_var.get().strip())
         if has_barcode:
             size_row.grid_remove()
+            align_row.grid_remove()
+            look_combo.configure(state="readonly")
+            look_label.configure(text_color=t["muted"])
         else:
             size_row.grid()
+            align_row.grid()
+            set_look_title(_NOTE_LOOK_TITLE)
+            look_combo.configure(state="disabled")
+            look_label.configure(text_color=t["line"])
 
     def set_status(kind: str, message: str) -> None:
         colors = {
@@ -1991,6 +2125,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         set_status("ok", f"Sent to {printer_name} ✓")
         pulse_print_success()
         set_printing(True)
+        reset_copies()
         serial_var.set("")
         root.after(50, focus_barcode)
         root.after(
@@ -2078,6 +2213,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     look_title_var.trace_add("write", schedule_preview)
     look_title_var.trace_add("write", update_mode_chrome)
     note_size_var.trace_add("write", schedule_preview)
+    note_align_var.trace_add("write", schedule_preview)
     sync_auto_look()
     update_mode_chrome()
 
@@ -2113,5 +2249,9 @@ if __name__ == "__main__":
     args = _parse_args()
     print_label(
         args.title,
-        LabelLayout(look=args.look, note_size=args.note_size),
+        LabelLayout(
+            look=args.look,
+            note_size=args.note_size,
+            note_align=args.note_align,
+        ),
     )
