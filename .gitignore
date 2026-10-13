@@ -3,3 +3,6 @@ __pycache__/
 
 # Local printer address — copy from printer_config.example.json
 printer_config.json
+
+# Local crash log from the print dialog
+label_printer_error.log

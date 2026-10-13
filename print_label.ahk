@@ -10,5 +10,6 @@
 RunLabel(title) {
     script := A_ScriptDir "\mini_label.py"
     cmd := Format('python "{1}" "{2}"', script, title)
-    ComObject("WScript.Shell").Run(cmd, 0, false)
+    ; Window style 1 = show normally. Style 0 hides the process windows.
+    ComObject("WScript.Shell").Run(cmd, 1, false)
 }

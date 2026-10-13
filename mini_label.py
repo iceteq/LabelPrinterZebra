@@ -1,11 +1,13 @@
 import argparse
 import io
 import json
+import queue
 import re
 import socket
 import sys
 import threading
 import tkinter as tk
+import traceback
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -22,7 +24,21 @@ _CONFIG_PATH = _CONFIG_DIR / "printer_config.json"
 _EXAMPLE_NAME = "printer_config.example.json"
 _BARCODE_ESCAPES_PATH = _CONFIG_DIR / "barcode_escapes.json"
 _BARCODE_ESCAPES_EXAMPLE = _CONFIG_DIR / "barcode_escapes.example.json"
+_ERROR_LOG_PATH = _CONFIG_DIR / "label_printer_error.log"
 _DEFAULT_PRINTER_PORT = 9100
+
+
+def _log_exception(where: str, exc: BaseException | None = None) -> None:
+    """Persist UI/thread failures so a vanishing window is diagnosable."""
+    try:
+        with open(_ERROR_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(f"\n--- {date.today().isoformat()} {where} ---\n")
+            if exc is not None:
+                fh.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            else:
+                fh.write("".join(traceback.format_exception(*sys.exc_info())))
+    except OSError:
+        pass
 
 
 @dataclass(frozen=True)
@@ -1577,10 +1593,14 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         "photo": None,
         "request_id": 0,
         "after_id": None,
+        "poll_after": None,
         "closed": False,
         "printed": 0,
         "pulse_after": None,
     }
+    preview_queue: queue.Queue = queue.Queue()
+    # Ignore Escape for a moment so leftover hotkey/keyboard events cannot close us.
+    close_armed_at = {"ms": 0}
 
     content = ctk.CTkFrame(card, fg_color="transparent")
     content.grid(row=2, column=0, sticky="we", padx=22)
@@ -2060,40 +2080,63 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     ) -> None:
         if preview_state["closed"] or request_id != preview_state["request_id"]:
             return
-        if png_data is None:
+        try:
+            if png_data is None:
+                preview_state["photo"] = None
+                preview_label.configure(image="", text=error or "Preview unavailable")
+                set_status("error", error or "Preview unavailable")
+                return
+            photo = _png_to_preview_image(png_data)
+            preview_state["photo"] = photo
+            preview_label.configure(image=photo, text="")
+            if warnings:
+                set_status("warn", " · ".join(warnings))
+            elif not status_var.get().startswith("Sent"):
+                set_status("info", "")
+        except Exception as exc:
+            _log_exception("apply_preview", exc)
             preview_state["photo"] = None
-            preview_label.configure(image=None, text=error or "Preview unavailable")
-            set_status("error", error or "Preview unavailable")
-            return
-        photo = _png_to_preview_image(png_data)
-        preview_state["photo"] = photo
-        preview_label.configure(image=photo, text="")
-        if warnings:
-            set_status("warn", " · ".join(warnings))
-        elif not status_var.get().startswith("Sent"):
-            set_status("info", "")
+            try:
+                preview_label.configure(image="", text="Preview failed")
+            except tk.TclError:
+                pass
+            set_status("error", f"Preview failed: {exc}")
 
     def refresh_preview() -> None:
         request_id = preview_state["request_id"] + 1
         preview_state["request_id"] = request_id
-        built = _preview_label(title_var.get(), serial_var.get(), current_layout())
+        try:
+            built = _preview_label(title_var.get(), serial_var.get(), current_layout())
+        except Exception as exc:
+            _log_exception("refresh_preview.build", exc)
+            apply_preview(request_id, None, f"Preview failed: {exc}", ())
+            return
         zpl = built.zpl
         warnings = built.warnings
 
         def fetch() -> None:
+            # Worker thread: never call Tk/CTk APIs here (crashes on Windows).
             try:
                 png_data = _fetch_labelary_png(zpl)
                 error = None
-            except RuntimeError as exc:
+            except Exception as exc:
                 png_data = None
                 error = str(exc)
             if not preview_state["closed"]:
-                root.after(
-                    0,
-                    lambda: apply_preview(request_id, png_data, error, warnings),
-                )
+                preview_queue.put((request_id, png_data, error, warnings))
 
         threading.Thread(target=fetch, daemon=True).start()
+
+    def poll_preview_queue() -> None:
+        """Drain preview results on the Tk thread only."""
+        try:
+            while True:
+                request_id, png_data, error, warnings = preview_queue.get_nowait()
+                apply_preview(request_id, png_data, error, warnings)
+        except queue.Empty:
+            pass
+        if not preview_state["closed"]:
+            preview_state["poll_after"] = root.after(50, poll_preview_queue)
 
     def schedule_preview(*_args: object) -> None:
         after_id = preview_state["after_id"]
@@ -2197,10 +2240,24 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         after_id = preview_state["after_id"]
         if after_id is not None:
             root.after_cancel(after_id)
+        poll_after = preview_state.get("poll_after")
+        if poll_after is not None:
+            root.after_cancel(poll_after)
         pulse = preview_state.get("pulse_after")
         if pulse is not None:
             root.after_cancel(pulse)
         root.destroy()
+
+    def on_escape(_event=None):
+        try:
+            now = int(root.tk.call("clock", "milliseconds"))
+        except tk.TclError:
+            now = close_armed_at["ms"]
+        # Grace period: ignore Escape so hotkey leftovers cannot close on open.
+        if now < close_armed_at["ms"]:
+            return "break"
+        on_cancel()
+        return "break"
 
     title_var.trace_add("write", schedule_preview)
     title_var.trace_add("write", sync_auto_look)
@@ -2214,33 +2271,55 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     sync_auto_look()
     update_mode_chrome()
 
+    # Enter prints from the fields only — not from the whole window
+    # (avoids hotkey/keyboard leftovers closing/acting on open).
     for sequence in ("<Return>", "<KP_Enter>"):
-        root.bind(sequence, lambda _event: on_print())
         serial_entry.bind(sequence, lambda _event: on_print())
         title_entry.bind(sequence, lambda _event: on_print())
-    # Delay Escape so a leftover key event from the host cannot close on open.
-    root.after(400, lambda: root.bind("<Escape>", lambda _event: on_cancel()))
+    root.bind("<Escape>", on_escape)
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
     def focus_initial_entry() -> None:
         _ensure_window_opaque(root)
         try:
             root.lift()
-            root.focus_force()
             root.attributes("-topmost", True)
         except tk.TclError:
             pass
         if default_title.strip():
             focus_barcode()
         else:
-            title_entry.focus_force()
+            try:
+                title_entry.focus_set()
+            except tk.TclError:
+                pass
+
+    def report_callback_exception(exc_type, exc_value, exc_traceback) -> None:
+        try:
+            with open(_ERROR_LOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write(f"\n--- {date.today().isoformat()} tk_callback ---\n")
+                fh.write(
+                    "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+                )
+        except OSError:
+            pass
+        try:
+            set_status("error", f"{getattr(exc_type, '__name__', 'Error')}: {exc_value}")
+        except Exception:
+            pass
+
+    root.report_callback_exception = report_callback_exception
 
     _fit_window()
     _ensure_window_opaque(root)
+    try:
+        close_armed_at["ms"] = int(root.tk.call("clock", "milliseconds")) + 2000
+    except tk.TclError:
+        close_armed_at["ms"] = 0
+    poll_preview_queue()
     schedule_preview()
     root.after(0, focus_initial_entry)
-    root.after(120, focus_initial_entry)
-    # Safety net: if anything left the window transparent, force it visible.
+    root.after(150, focus_initial_entry)
     root.after(300, lambda: _ensure_window_opaque(root))
     root.mainloop()
 
@@ -2250,12 +2329,24 @@ def print_label(default_title: str = "", layout: LabelLayout | None = None):
 
 
 if __name__ == "__main__":
-    args = _parse_args()
-    print_label(
-        args.title,
-        LabelLayout(
-            look=args.look,
-            note_size=args.note_size,
-            note_align=args.note_align,
-        ),
-    )
+    try:
+        args = _parse_args()
+        print_label(
+            args.title,
+            LabelLayout(
+                look=args.look,
+                note_size=args.note_size,
+                note_align=args.note_align,
+            ),
+        )
+    except Exception as exc:
+        _log_exception("main", exc)
+        try:
+            messagebox.showerror(
+                "Label printer failed",
+                f"{type(exc).__name__}: {exc}\n\nDetails written to:\n{_ERROR_LOG_PATH}",
+            )
+        except Exception:
+            print(f"Label printer failed: {exc}", file=sys.stderr)
+            print(f"Details: {_ERROR_LOG_PATH}", file=sys.stderr)
+        raise
