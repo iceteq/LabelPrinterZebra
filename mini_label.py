@@ -1624,7 +1624,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     outer = ttk.Frame(root, style="TFrame", padding=12)
     outer.pack(fill="both", expand=True)
 
-    # Action bar packed first at bottom so Close/Print stay visible.
+    # Action bar packed first at bottom so More/Close/Print stay visible.
+    more_open = tk.BooleanVar(value=False)
     actions = ttk.Frame(outer, style="TFrame")
     actions.pack(side=tk.BOTTOM, fill="x", pady=(10, 0))
     actions.grid_columnconfigure(0, weight=1)
@@ -1634,8 +1635,14 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     )
     btn_row = ttk.Frame(actions, style="TFrame")
     btn_row.grid(row=0, column=1, sticky="e")
+
+    def on_more_click() -> None:
+        more_open.set(not more_open.get())
+
+    more_button = ttk.Button(btn_row, text="More", command=on_more_click)
+    more_button.pack(side=tk.LEFT)
     cancel_button = ttk.Button(btn_row, text="Close", command=lambda: on_cancel())
-    cancel_button.pack(side=tk.LEFT)
+    cancel_button.pack(side=tk.LEFT, padx=(8, 0))
     print_button = ttk.Button(
         btn_row, text="Print  ↵", style="Accent.TButton", command=lambda: on_print()
     )
@@ -1750,12 +1757,6 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     status_var = tk.StringVar(value="")
     status_label = ttk.Label(card, textvariable=status_var, style="Status.TLabel")
     status_label.grid(row=4, column=0, sticky="w", pady=(8, 0))
-
-    more_open = tk.BooleanVar(value=False)
-    more_toggle = ttk.Checkbutton(
-        card, text="More options", variable=more_open, style="TCheckbutton"
-    )
-    more_toggle.grid(row=5, column=0, sticky="w", pady=(10, 0))
 
     more = ttk.Frame(card, style="More.TFrame", padding=(0, 8, 0, 0))
     more.grid_columnconfigure(1, weight=1)
@@ -1899,9 +1900,11 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     def toggle_more(*_args: object) -> None:
         if more_open.get():
-            more.grid(row=6, column=0, sticky="we")
+            more.grid(row=5, column=0, sticky="we", pady=(10, 0))
+            more_button.configure(text="Less")
         else:
             more.grid_remove()
+            more_button.configure(text="More")
         root.after_idle(_fit_window)
 
     more_open.trace_add("write", toggle_more)
@@ -2117,7 +2120,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             printer = store.selected_printer()
             if printer is None:
                 raise FileNotFoundError(
-                    "No printer configured. Open More options → Manage…"
+                    "No printer configured. Open More → Manage…"
                 )
             set_status("info", f"Connecting to {printer.name}…")
             root.update_idletasks()
