@@ -411,11 +411,15 @@ class LabelLayout:
     look: str = _DEFAULT_LOOK
     note_size: str = "medium"
     note_align: str = _DEFAULT_NOTE_ALIGN
+    show_caption: bool = True  # human-readable text under barcode (Side title)
+    show_footer: bool = True  # author · date stamp
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "look", _normalize_look(self.look))
         object.__setattr__(self, "note_size", _normalize_size(self.note_size))
         object.__setattr__(self, "note_align", _normalize_note_align(self.note_align))
+        object.__setattr__(self, "show_caption", bool(self.show_caption))
+        object.__setattr__(self, "show_footer", bool(self.show_footer))
 
     @property
     def recipe(self) -> LookRecipe:
@@ -622,8 +626,8 @@ def _barcode_zpl(x: int, y: int, payload: str, height: int, module: int) -> str:
     )
 
 
-def _stamp_reserve() -> int:
-    return _STAMP_FONT_H + 14
+def _stamp_reserve(*, show_footer: bool = True) -> int:
+    return (_STAMP_FONT_H + 14) if show_footer else 0
 
 
 def _signature_zpl(margin: int) -> str:
@@ -643,15 +647,15 @@ def _adaptive_margin(dense: bool) -> int:
     return 40 if dense else 48
 
 
-def _content_bottom(margin: int) -> int:
-    return _LABEL_HEIGHT - margin - _stamp_reserve()
+def _content_bottom(margin: int, *, show_footer: bool = True) -> int:
+    return _LABEL_HEIGHT - margin - _stamp_reserve(show_footer=show_footer)
 
 
 def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildResult:
     prefer_h, prefer_w = _NOTE_SIZE[layout.note_size]
     h_align, v_align = _NOTE_ALIGN[layout.note_align]
     margin = _adaptive_margin(prefer_h >= 72)
-    bottom = _content_bottom(margin)
+    bottom = _content_bottom(margin, show_footer=layout.show_footer)
     block_w = _LABEL_WIDTH - 2 * margin
     available = max(prefer_h, bottom - margin)
     # Provisional line budget at preferred size, then refit after shrink.
@@ -691,7 +695,7 @@ def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildRes
             block_w,
             max_lines=max_lines,
         )
-        + _signature_zpl(margin)
+        + (_signature_zpl(margin) if layout.show_footer else "")
         + f"^PQ{copies}"
         + "^XZ"
     )
@@ -704,6 +708,8 @@ def _build_side_zpl(
     recipe: LookRecipe,
     *,
     copies: int,
+    show_caption: bool = True,
+    show_footer: bool = True,
 ) -> BuildResult:
     payload = _decode_barcode_input(serial)
     margin = 40
@@ -746,28 +752,30 @@ def _build_side_zpl(
     warnings.extend(_barcode_warnings(module, recipe.module_pref))
     bar_h = recipe.bar_h
     caption_pref_h, caption_pref_w = recipe.caption_h, recipe.caption_w
-    gap_bc = max(5, int(caption_pref_h * 0.12))
-    bottom = _content_bottom(margin)
-    block_h = bar_h + gap_bc + caption_pref_h
+    gap_bc = max(5, int(caption_pref_h * 0.12)) if show_caption else 0
+    caption_h = caption_pref_h if show_caption else 0
+    bottom = _content_bottom(margin, show_footer=show_footer)
+    block_h = bar_h + gap_bc + caption_h
     if margin + block_h > bottom:
         bar_h = max(_MIN_BAR_H, bar_h - (margin + block_h - bottom))
-    y0 = margin + max(0, (bottom - margin - (bar_h + gap_bc + caption_pref_h)) // 2)
-    # Recompute vertical center with fitted caption height after fit.
     bar_w = _estimate_barcode_width(payload, module)
     bar_x = bar_area_x
-    fitted_caption = _fit_text_to_width(
-        _caption_display(serial),
-        caption_pref_h,
-        caption_pref_w,
-        float(bar_max_w),
-        _MIN_CAPTION_H,
-    )
-    if fitted_caption.shrunk:
-        warnings.append("Caption shrunk to fit")
-    if fitted_caption.truncated:
-        warnings.append("Caption shortened to fit")
-    gap_bc = max(5, int(fitted_caption.font_h * 0.12))
-    block_h = bar_h + gap_bc + fitted_caption.font_h
+    fitted_caption = FittedText("", caption_pref_h, caption_pref_w, False, False)
+    if show_caption:
+        fitted_caption = _fit_text_to_width(
+            _caption_display(serial),
+            caption_pref_h,
+            caption_pref_w,
+            float(bar_max_w),
+            _MIN_CAPTION_H,
+        )
+        if fitted_caption.shrunk:
+            warnings.append("Caption shrunk to fit")
+        if fitted_caption.truncated:
+            warnings.append("Caption shortened to fit")
+        gap_bc = max(5, int(fitted_caption.font_h * 0.12))
+        caption_h = fitted_caption.font_h
+    block_h = bar_h + gap_bc + caption_h
     y0 = margin + max(0, (bottom - margin - block_h) // 2)
     title_y = y0 + max(0, (bar_h - fitted_title.font_h) // 2)
 
@@ -785,18 +793,20 @@ def _build_side_zpl(
             )
         )
     parts.append(_barcode_zpl(bar_x, y0, payload, bar_h, module))
-    parts.append(
-        _text_zpl(
-            bar_x,
-            y0 + bar_h + gap_bc,
-            fitted_caption.text,
-            fitted_caption.font_h,
-            fitted_caption.font_w,
-            "left",
-            max(bar_w, bar_max_w),
+    if show_caption:
+        parts.append(
+            _text_zpl(
+                bar_x,
+                y0 + bar_h + gap_bc,
+                fitted_caption.text,
+                fitted_caption.font_h,
+                fitted_caption.font_w,
+                "left",
+                max(bar_w, bar_max_w),
+            )
         )
-    )
-    parts.append(_signature_zpl(margin))
+    if show_footer:
+        parts.append(_signature_zpl(margin))
     parts.append(f"^PQ{copies}")
     parts.append("^XZ")
     return BuildResult("".join(parts), tuple(dict.fromkeys(warnings)))
@@ -808,6 +818,7 @@ def _build_stack_zpl(
     recipe: LookRecipe,
     *,
     copies: int,
+    show_footer: bool = True,
 ) -> BuildResult:
     payload = _decode_barcode_input(serial)
     warnings: list[str] = []
@@ -815,7 +826,7 @@ def _build_stack_zpl(
     caption_pref_h, caption_pref_w = recipe.caption_h, recipe.caption_w
     dense = (recipe.title_h + recipe.bar_h + caption_pref_h) > 220
     margin = _adaptive_margin(dense)
-    bottom = _content_bottom(margin)
+    bottom = _content_bottom(margin, show_footer=show_footer)
     block_w = _LABEL_WIDTH - 2 * margin
     quiet = max(10, recipe.module_pref * 8)
     module = _fit_module(
@@ -897,7 +908,8 @@ def _build_stack_zpl(
             block_w,
         )
     )
-    parts.append(_signature_zpl(margin))
+    if show_footer:
+        parts.append(_signature_zpl(margin))
     parts.append(f"^PQ{copies}")
     parts.append("^XZ")
     return BuildResult("".join(parts), tuple(dict.fromkeys(warnings)))
@@ -918,8 +930,21 @@ def _compose_label(
     look = _DEFAULT_LOOK if layout.look == _NOTE_LOOK else layout.look
     recipe = _LOOKS[look]
     if recipe.stack == "side":
-        return _build_side_zpl(title, serial.strip(), recipe, copies=quantity)
-    return _build_stack_zpl(title, serial.strip(), recipe, copies=quantity)
+        return _build_side_zpl(
+            title,
+            serial.strip(),
+            recipe,
+            copies=quantity,
+            show_caption=layout.show_caption,
+            show_footer=layout.show_footer,
+        )
+    return _build_stack_zpl(
+        title,
+        serial.strip(),
+        recipe,
+        copies=quantity,
+        show_footer=layout.show_footer,
+    )
 
 
 def _build_zpl(
@@ -1165,6 +1190,16 @@ def _parse_args():
         default=_DEFAULT_NOTE_ALIGN,
         help="Note text alignment when printing without a barcode",
     )
+    parser.add_argument(
+        "--no-caption",
+        action="store_true",
+        help="Hide barcode caption text (Side title look)",
+    )
+    parser.add_argument(
+        "--no-footer",
+        action="store_true",
+        help="Hide author/date footer stamp",
+    )
     return parser.parse_args()
 
 
@@ -1240,7 +1275,7 @@ def _apply_ttk_theme(root: tk.Misc, ui_font: str) -> None:
     style.configure("Status.TLabel", background=t["surface"], foreground=t["danger"], font=(ui_font, 10))
     style.configure("Warn.TLabel", background=t["surface"], foreground=t["warn"], font=(ui_font, 10))
     style.configure("Ok.TLabel", background=t["surface"], foreground=t["ok"], font=(ui_font, 10))
-    style.configure("Muted.TLabel", background=t["surface"], foreground=t["muted"], font=(ui_font, 10))
+    style.configure("Muted.TLabel", background=t["bg"], foreground=t["muted"], font=(ui_font, 10))
     style.configure("TButton", font=(ui_font, 11), padding=(10, 6))
     style.configure("Accent.TButton", font=(ui_font, 12, "bold"), padding=(14, 8))
     style.map(
@@ -1259,6 +1294,7 @@ def _apply_ttk_theme(root: tk.Misc, ui_font: str) -> None:
     style.configure("TEntry", fieldbackground=t["white"], foreground=t["ink"], padding=6)
     style.configure("TCombobox", fieldbackground=t["white"], foreground=t["ink"], padding=4)
     style.configure("TCheckbutton", background=t["surface"], foreground=t["muted"], font=(ui_font, 10))
+    style.configure("More.TCheckbutton", background=t["bg"], foreground=t["muted"], font=(ui_font, 10))
 
 
 def _open_printer_manager(parent: tk.Tk, on_changed) -> None:
@@ -1473,11 +1509,27 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         pass
 
     outer = ttk.Frame(root, style="TFrame", padding=12)
-    outer.grid(row=0, column=0, sticky="nsew")
-    outer.grid_columnconfigure(0, weight=1)
+    outer.pack(fill="both", expand=True)
+
+    # Action bar packed first at bottom so Close/Print stay visible.
+    actions = ttk.Frame(outer, style="TFrame")
+    actions.pack(side=tk.BOTTOM, fill="x", pady=(10, 0))
+    actions.grid_columnconfigure(0, weight=1)
+    session_var = tk.StringVar(value="")
+    ttk.Label(actions, textvariable=session_var, style="Muted.TLabel").grid(
+        row=0, column=0, sticky="w"
+    )
+    btn_row = ttk.Frame(actions, style="TFrame")
+    btn_row.grid(row=0, column=1, sticky="e")
+    cancel_button = ttk.Button(btn_row, text="Close", command=lambda: on_cancel())
+    cancel_button.pack(side=tk.LEFT)
+    print_button = ttk.Button(
+        btn_row, text="Print  ↵", style="Accent.TButton", command=lambda: on_print()
+    )
+    print_button.pack(side=tk.LEFT, padx=(8, 0))
 
     card = ttk.Frame(outer, style="Card.TFrame", padding=16)
-    card.grid(row=0, column=0, sticky="nsew")
+    card.pack(side=tk.TOP, fill="both", expand=True)
     card.grid_columnconfigure(0, weight=1)
 
     ttk.Label(card, text="Label", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
@@ -1548,6 +1600,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     look_title_var = tk.StringVar(value=initial_look_title)
     note_size_var = tk.StringVar(value=layout.note_size)
     note_align_var = tk.StringVar(value=layout.note_align)
+    show_caption_var = tk.BooleanVar(value=layout.show_caption)
+    show_footer_var = tk.BooleanVar(value=layout.show_footer)
     copies_var = tk.StringVar(value="1")
     printer_var = tk.StringVar(value=printer_store["value"].selected)
 
@@ -1652,7 +1706,27 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         align_btns[key] = btn
     _paint_align_buttons()
 
-    ttk.Label(more, text="Copies", style="More.TLabel").grid(row=4, column=0, sticky="w", pady=4)
+    caption_row = ttk.Frame(more, style="More.TFrame")
+    caption_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
+    ttk.Checkbutton(
+        caption_row,
+        text="Barcode caption",
+        variable=show_caption_var,
+        style="More.TCheckbutton",
+        command=lambda: schedule_preview(),
+    ).pack(side=tk.LEFT)
+
+    footer_row = ttk.Frame(more, style="More.TFrame")
+    footer_row.grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
+    ttk.Checkbutton(
+        footer_row,
+        text="Footer (name · date)",
+        variable=show_footer_var,
+        style="More.TCheckbutton",
+        command=lambda: schedule_preview(),
+    ).pack(side=tk.LEFT)
+
+    ttk.Label(more, text="Copies", style="More.TLabel").grid(row=6, column=0, sticky="w", pady=4)
     copies_combo = ttk.Combobox(
         more,
         textvariable=copies_var,
@@ -1661,14 +1735,24 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         width=5,
         font=(ui_font, 11),
     )
-    copies_combo.grid(row=4, column=1, sticky="w", pady=4)
+    copies_combo.grid(row=6, column=1, sticky="w", pady=4)
 
     def _fit_window() -> None:
         root.update_idletasks()
-        needed_w = max(520, card.winfo_reqwidth() + 40)
-        needed_h = max(560, card.winfo_reqheight() + 40)
-        if more_open.get():
-            needed_h = max(needed_h, card.winfo_reqheight() + 40)
+        card.update_idletasks()
+        actions.update_idletasks()
+        # Actions sit outside the card so Close/Print stay pinned and visible
+        # whether More options is open or closed.
+        pad = 36
+        needed_w = max(520, card.winfo_reqwidth() + pad, actions.winfo_reqwidth() + pad)
+        needed_h = card.winfo_reqheight() + actions.winfo_reqheight() + pad
+        # Never size shorter than the pinned action bar + a usable card.
+        min_h = actions.winfo_reqheight() + pad + 360
+        needed_h = max(needed_h, min_h)
+        try:
+            root.minsize(520, min_h)
+        except tk.TclError:
+            pass
         _center_window(root, width=needed_w, height=needed_h, min_width=520)
 
     def toggle_more(*_args: object) -> None:
@@ -1680,25 +1764,13 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     more_open.trace_add("write", toggle_more)
 
-    actions = ttk.Frame(card, style="Card.TFrame")
-    actions.grid(row=7, column=0, sticky="we", pady=(14, 0))
-    actions.grid_columnconfigure(0, weight=1)
-    session_var = tk.StringVar(value="")
-    ttk.Label(actions, textvariable=session_var, style="Muted.TLabel").grid(
-        row=0, column=0, sticky="w"
-    )
-    btn_row = ttk.Frame(actions, style="Card.TFrame")
-    btn_row.grid(row=0, column=1, sticky="e")
-    cancel_button = ttk.Button(btn_row, text="Close", command=lambda: on_cancel())
-    cancel_button.pack(side=tk.LEFT)
-    print_button = ttk.Button(btn_row, text="Print  ↵", style="Accent.TButton", command=lambda: on_print())
-    print_button.pack(side=tk.LEFT, padx=(8, 0))
-
     def current_layout() -> LabelLayout:
         return LabelLayout(
             look=_look_id_from_title(look_title_var.get()),
             note_size=note_size_var.get(),
             note_align=note_align_var.get(),
+            show_caption=bool(show_caption_var.get()),
+            show_footer=bool(show_footer_var.get()),
         )
 
     def current_copies() -> int:
@@ -1731,6 +1803,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     def update_mode_chrome(*_args: object) -> None:
         has_barcode = bool(serial_var.get().strip())
+        look_id = _look_id_from_title(look_title_var.get())
         if has_barcode:
             size_row.grid_remove()
             align_row.grid_remove()
@@ -1740,6 +1813,14 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             align_row.grid()
             set_look_title(_NOTE_LOOK_TITLE)
             look_combo.configure(state="disabled")
+            look_id = _NOTE_LOOK
+        # Caption toggle is for Side title only.
+        if has_barcode and look_id == "side":
+            caption_row.grid()
+        else:
+            caption_row.grid_remove()
+        if more_open.get():
+            root.after_idle(_fit_window)
 
     def set_status(kind: str, message: str) -> None:
         styles = {
@@ -1996,6 +2077,8 @@ if __name__ == "__main__":
                 look=args.look,
                 note_size=args.note_size,
                 note_align=args.note_align,
+                show_caption=not args.no_caption,
+                show_footer=not args.no_footer,
             ),
         )
     except Exception as exc:
