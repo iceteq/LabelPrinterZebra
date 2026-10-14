@@ -828,8 +828,11 @@ def _build_side_zpl(
         if fitted_title.truncated:
             warnings.append("Title shortened to fit")
 
-    bar_area_x = margin + (title_col + gap if raw_title else 0)
-    bar_max_w = _LABEL_WIDTH - bar_area_x - margin
+    h_align, v_align = _NOTE_ALIGN[layout.note_align]
+    # Title beside barcode: Left keeps title|bar, Right mirrors to bar|title.
+    title_on_left = h_align != "right"
+    title_span = (title_col + gap) if raw_title else 0
+    bar_max_w = _LABEL_WIDTH - 2 * margin - title_span
     quiet = 12
     module = _fit_module(
         payload, recipe.module_pref, max(40, bar_max_w - quiet), recipe.bar_fill
@@ -844,7 +847,6 @@ def _build_side_zpl(
     if margin + block_h > bottom:
         bar_h = max(_MIN_BAR_H, bar_h - (margin + block_h - bottom))
     bar_w = _estimate_barcode_width(payload, module)
-    bar_x = bar_area_x
     fitted_caption = FittedText("", caption_pref_h, caption_pref_w, False, False)
     if show_caption:
         fitted_caption = _fit_text_to_width(
@@ -861,14 +863,42 @@ def _build_side_zpl(
         gap_bc = max(5, int(fitted_caption.font_h * 0.12))
         caption_h = fitted_caption.font_h
     block_h = bar_h + gap_bc + caption_h
-    y0 = margin + max(0, (bottom - margin - block_h) // 2)
+    content_h = max(0, bottom - margin)
+    if v_align == "top":
+        y0 = margin
+    elif v_align == "bottom":
+        y0 = max(margin, bottom - block_h)
+    else:
+        y0 = margin + max(0, (content_h - block_h) // 2)
     title_y = y0 + max(0, (bar_h - fitted_title.font_h) // 2)
+
+    # Horizontal placement of the title+barcode unit.
+    unit_w = title_span + bar_w
+    block_w = _LABEL_WIDTH - 2 * margin
+    if h_align == "center":
+        unit_x = margin + max(0, (block_w - unit_w) // 2)
+    elif h_align == "right" and not raw_title:
+        unit_x = max(margin, _LABEL_WIDTH - margin - bar_w)
+    else:
+        unit_x = margin
+    if raw_title and not title_on_left:
+        bar_x = unit_x
+        title_x = unit_x + bar_w + gap
+        # Keep title inside the label when barcode is wide.
+        title_x = min(title_x, _LABEL_WIDTH - margin - title_col)
+        bar_x = max(margin, min(bar_x, title_x - gap - bar_w))
+    elif raw_title:
+        title_x = unit_x
+        bar_x = unit_x + title_col + gap
+    else:
+        title_x = margin
+        bar_x = unit_x
 
     parts = [_zpl_header()]
     if raw_title and fitted_title.text:
         parts.append(
             _text_zpl(
-                margin,
+                title_x,
                 title_y,
                 fitted_title.text,
                 fitted_title.font_h,
@@ -886,7 +916,7 @@ def _build_side_zpl(
                 fitted_caption.text,
                 fitted_caption.font_h,
                 fitted_caption.font_w,
-                "left",
+                "left" if title_on_left or h_align == "center" else "right",
                 max(bar_w, bar_max_w),
             )
         )
@@ -956,11 +986,14 @@ def _build_stack_zpl(
         overflow = margin + block_h - bottom
         bar_h = max(_MIN_BAR_H, bar_h - overflow)
         block_h = title_h + gap_tb + bar_h + gap_bc + fitted_caption.font_h
-    if recipe.valign == "middle":
-        y = margin + max(0, (bottom - margin - block_h) // 2)
+    h_align, v_align = _NOTE_ALIGN[layout.note_align]
+    content_h = max(0, bottom - margin)
+    if v_align == "top":
+        y = margin
+    elif v_align == "bottom":
+        y = max(margin, bottom - block_h)
     else:
-        y = margin + 4
-    align = recipe.align
+        y = margin + max(0, (content_h - block_h) // 2)
     parts = [_zpl_header()]
     if has_title:
         parts.append(
@@ -970,15 +1003,15 @@ def _build_stack_zpl(
                 fitted_title.text,
                 fitted_title.font_h,
                 fitted_title.font_w,
-                align,
+                h_align,
                 block_w,
             )
         )
         y += title_h + gap_tb
     bar_w = _estimate_barcode_width(payload, module)
-    if align == "left":
+    if h_align == "left":
         bar_x = margin
-    elif align == "right":
+    elif h_align == "right":
         bar_x = max(margin, _LABEL_WIDTH - margin - bar_w)
     else:
         bar_x = margin + max(0, (block_w - bar_w) // 2)
@@ -991,7 +1024,7 @@ def _build_stack_zpl(
             fitted_caption.text,
             fitted_caption.font_h,
             fitted_caption.font_w,
-            align,
+            h_align,
             block_w,
         )
     )
@@ -1275,7 +1308,7 @@ def _parse_args():
         "--note-align",
         choices=_NOTE_ALIGN_STEPS,
         default=saved.note_align,
-        help="Note text alignment when printing without a barcode",
+        help="Label alignment (Left/Right/Top/Bottom/Center) for all looks",
     )
     parser.add_argument(
         "--title-size",
@@ -1960,13 +1993,13 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     def update_mode_chrome(*_args: object) -> None:
         has_barcode = bool(serial_var.get().strip())
         look_id = _look_id_from_title(look_title_var.get())
+        # Align applies to every look (Note and barcode).
+        align_row.grid()
         if has_barcode:
-            align_row.grid_remove()
             look_combo.configure(state="readonly")
             if look_id != _NOTE_LOOK:
                 last_barcode_look["id"] = look_id
         else:
-            align_row.grid()
             set_look_title(_NOTE_LOOK_TITLE)
             look_combo.configure(state="disabled")
             look_id = _NOTE_LOOK
