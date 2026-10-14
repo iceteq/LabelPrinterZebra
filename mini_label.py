@@ -232,6 +232,14 @@ _SIZE_LABELS = {
     "xl": "XL",
     "xxl": "XXL",
 }
+# Compact labels for steppers beside input fields.
+_SIZE_COMPACT = {
+    "small": "S",
+    "medium": "M",
+    "large": "L",
+    "xl": "XL",
+    "xxl": "XXL",
+}
 # Type sizes — fit-to-box shrinks when content needs it.
 _NOTE_SIZE = {
     "small": (52, 46),
@@ -1304,35 +1312,36 @@ def _parse_args():
     return parser.parse_args(), saved
 
 
-def _pack_size_stepper(
+def _pack_inline_size_stepper(
     parent: ttk.Frame,
     *,
-    label: str,
-    size_var: tk.StringVar,
+    get_size,
+    set_size,
     on_change,
-) -> ttk.Frame:
-    """− / size / + row for More options."""
-    row = ttk.Frame(parent, style="More.TFrame")
-    ttk.Label(row, text=label, style="More.TLabel").pack(side=tk.LEFT)
-    stepper = ttk.Frame(row, style="More.TFrame")
-    stepper.pack(side=tk.LEFT, padx=(8, 0))
-    display_var = tk.StringVar(value=_SIZE_LABELS[_normalize_size(size_var.get())])
+    frame_style: str = "Card.TFrame",
+    label_style: str = "Field.TLabel",
+):
+    """Compact − / size / + control for the right side of an input row.
+
+    Returns (stepper_frame, refresh_display).
+    """
+    stepper = ttk.Frame(parent, style=frame_style)
+    display_var = tk.StringVar(value=_SIZE_COMPACT[_normalize_size(get_size())])
 
     def refresh_display(*_args: object) -> None:
-        display_var.set(_SIZE_LABELS[_normalize_size(size_var.get())])
-
-    size_var.trace_add("write", refresh_display)
+        display_var.set(_SIZE_COMPACT[_normalize_size(get_size())])
 
     def bump(delta: int) -> None:
-        size_var.set(_bump_size(size_var.get(), delta))
+        set_size(_bump_size(get_size(), delta))
+        refresh_display()
         on_change()
 
     ttk.Button(stepper, text="−", width=3, command=lambda: bump(-1)).pack(side=tk.LEFT)
     ttk.Label(
-        stepper, textvariable=display_var, width=8, anchor="center", style="More.TLabel"
-    ).pack(side=tk.LEFT, padx=4)
+        stepper, textvariable=display_var, width=4, anchor="center", style=label_style
+    ).pack(side=tk.LEFT, padx=2)
     ttk.Button(stepper, text="+", width=3, command=lambda: bump(1)).pack(side=tk.LEFT)
-    return row
+    return stepper, refresh_display
 
 
 def _look_display_names() -> list[str]:
@@ -1658,15 +1667,69 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     content.grid(row=2, column=0, sticky="we")
     content.grid_columnconfigure(0, weight=1)
 
-    ttk.Label(content, text="Title", style="Field.TLabel").grid(row=0, column=0, sticky="w")
+    if not default_title.strip() and layout.look in (_DEFAULT_LOOK, _NOTE_LOOK):
+        initial_look_title = _NOTE_LOOK_TITLE
+    else:
+        initial_look_title = _look_title_for_id(layout.look)
+    look_title_var = tk.StringVar(value=initial_look_title)
+    note_size_var = tk.StringVar(value=layout.note_size)
+    note_align_var = tk.StringVar(value=layout.note_align)
+    title_size_var = tk.StringVar(value=layout.title_size)
+    caption_size_var = tk.StringVar(value=layout.caption_size)
+    show_caption_var = tk.BooleanVar(value=layout.show_caption)
+    show_footer_var = tk.BooleanVar(value=layout.show_footer)
+    # Copies are never persisted — always start at 1.
+    copies_var = tk.StringVar(value="1")
+    printer_var = tk.StringVar(value=printer_store["value"].selected)
+
     title_var = tk.StringVar(value=default_title)
-    title_entry = ttk.Entry(content, textvariable=title_var, width=42, font=(ui_font, 13))
-    title_entry.grid(row=1, column=0, sticky="we", pady=(2, 10))
+    serial_var = tk.StringVar()
+
+    def _on_inline_size_change() -> None:
+        schedule_preview()
+        persist_settings()
+
+    def _title_size_get() -> str:
+        # Title field steppers control note size without a barcode.
+        if serial_var.get().strip():
+            return title_size_var.get()
+        return note_size_var.get()
+
+    def _title_size_set(value: str) -> None:
+        if serial_var.get().strip():
+            title_size_var.set(value)
+        else:
+            note_size_var.set(value)
+
+    ttk.Label(content, text="Title", style="Field.TLabel").grid(row=0, column=0, sticky="w")
+    title_row = ttk.Frame(content, style="Card.TFrame")
+    title_row.grid(row=1, column=0, sticky="we", pady=(2, 10))
+    title_row.grid_columnconfigure(0, weight=1)
+    title_entry = ttk.Entry(title_row, textvariable=title_var, width=32, font=(ui_font, 13))
+    title_entry.grid(row=0, column=0, sticky="we")
+    title_stepper, refresh_title_size_display = _pack_inline_size_stepper(
+        title_row,
+        get_size=_title_size_get,
+        set_size=_title_size_set,
+        on_change=_on_inline_size_change,
+    )
+    title_stepper.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
     ttk.Label(content, text="Barcode", style="Field.TLabel").grid(row=2, column=0, sticky="w")
-    serial_var = tk.StringVar()
-    serial_entry = ttk.Entry(content, textvariable=serial_var, width=42, font=(mono_font, 13))
-    serial_entry.grid(row=3, column=0, sticky="we", pady=(2, 0))
+    barcode_row = ttk.Frame(content, style="Card.TFrame")
+    barcode_row.grid(row=3, column=0, sticky="we", pady=(2, 0))
+    barcode_row.grid_columnconfigure(0, weight=1)
+    serial_entry = ttk.Entry(
+        barcode_row, textvariable=serial_var, width=32, font=(mono_font, 13)
+    )
+    serial_entry.grid(row=0, column=0, sticky="we")
+    caption_stepper, refresh_caption_size_display = _pack_inline_size_stepper(
+        barcode_row,
+        get_size=lambda: caption_size_var.get(),
+        set_size=lambda value: caption_size_var.set(value),
+        on_change=_on_inline_size_change,
+    )
+    caption_stepper.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
     stage = ttk.Frame(card, style="Stage.TFrame", padding=10)
     stage.grid(row=3, column=0, sticky="we", pady=(14, 0))
@@ -1696,21 +1759,6 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
 
     more = ttk.Frame(card, style="More.TFrame", padding=(0, 8, 0, 0))
     more.grid_columnconfigure(1, weight=1)
-
-    if not default_title.strip() and layout.look in (_DEFAULT_LOOK, _NOTE_LOOK):
-        initial_look_title = _NOTE_LOOK_TITLE
-    else:
-        initial_look_title = _look_title_for_id(layout.look)
-    look_title_var = tk.StringVar(value=initial_look_title)
-    note_size_var = tk.StringVar(value=layout.note_size)
-    note_align_var = tk.StringVar(value=layout.note_align)
-    title_size_var = tk.StringVar(value=layout.title_size)
-    caption_size_var = tk.StringVar(value=layout.caption_size)
-    show_caption_var = tk.BooleanVar(value=layout.show_caption)
-    show_footer_var = tk.BooleanVar(value=layout.show_footer)
-    # Copies are never persisted — always start at 1.
-    copies_var = tk.StringVar(value="1")
-    printer_var = tk.StringVar(value=printer_store["value"].selected)
 
     ttk.Label(more, text="Printer", style="More.TLabel").grid(row=0, column=0, sticky="w", pady=4)
     printer_row = ttk.Frame(more, style="More.TFrame")
@@ -1767,13 +1815,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         schedule_preview()
         persist_settings()
 
-    size_row = _pack_size_stepper(
-        more, label="Note size", size_var=note_size_var, on_change=_on_setting_change
-    )
-    size_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
-
     align_row = ttk.Frame(more, style="More.TFrame")
-    align_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+    align_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
     ttk.Label(align_row, text="Align", style="More.TLabel").pack(side=tk.LEFT)
     align_btns: dict[str, ttk.Button] = {}
 
@@ -1800,21 +1843,9 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         align_btns[key] = btn
     _paint_align_buttons()
 
-    title_size_row = _pack_size_stepper(
-        more, label="Title size", size_var=title_size_var, on_change=_on_setting_change
-    )
-    title_size_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
-
-    caption_size_row = _pack_size_stepper(
-        more,
-        label="Caption size",
-        size_var=caption_size_var,
-        on_change=_on_setting_change,
-    )
-    caption_size_row.grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
-
     caption_row = ttk.Frame(more, style="More.TFrame")
-    caption_row.grid(row=6, column=0, columnspan=2, sticky="w", pady=4)
+    caption_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+
     def _on_caption_toggle() -> None:
         update_mode_chrome()
         _on_setting_change()
@@ -1828,7 +1859,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     ).pack(side=tk.LEFT)
 
     footer_row = ttk.Frame(more, style="More.TFrame")
-    footer_row.grid(row=7, column=0, columnspan=2, sticky="w", pady=4)
+    footer_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
     ttk.Checkbutton(
         footer_row,
         text="Footer (name · date)",
@@ -1837,7 +1868,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         command=_on_setting_change,
     ).pack(side=tk.LEFT)
 
-    ttk.Label(more, text="Copies", style="More.TLabel").grid(row=8, column=0, sticky="w", pady=4)
+    ttk.Label(more, text="Copies", style="More.TLabel").grid(row=5, column=0, sticky="w", pady=4)
     copies_combo = ttk.Combobox(
         more,
         textvariable=copies_var,
@@ -1846,7 +1877,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         width=5,
         font=(ui_font, 11),
     )
-    copies_combo.grid(row=8, column=1, sticky="w", pady=4)
+    copies_combo.grid(row=5, column=1, sticky="w", pady=4)
 
     def _fit_window() -> None:
         root.update_idletasks()
@@ -1927,33 +1958,31 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         has_barcode = bool(serial_var.get().strip())
         look_id = _look_id_from_title(look_title_var.get())
         if has_barcode:
-            size_row.grid_remove()
             align_row.grid_remove()
-            title_size_row.grid()
             look_combo.configure(state="readonly")
             if look_id != _NOTE_LOOK:
                 last_barcode_look["id"] = look_id
         else:
-            size_row.grid()
             align_row.grid()
-            title_size_row.grid_remove()
-            caption_size_row.grid_remove()
             set_look_title(_NOTE_LOOK_TITLE)
             look_combo.configure(state="disabled")
             look_id = _NOTE_LOOK
-        # Caption toggle is for Side title only; caption size when caption is on.
+        # Caption toggle is for Side title only.
         show_cap_toggle = has_barcode and look_id == "side"
         if show_cap_toggle:
             caption_row.grid()
         else:
             caption_row.grid_remove()
+        # Caption size −/+ sits beside the barcode field when a caption applies.
         show_cap_size = has_barcode and (
             look_id != "side" or bool(show_caption_var.get())
         )
         if show_cap_size:
-            caption_size_row.grid()
+            caption_stepper.grid()
         else:
-            caption_size_row.grid_remove()
+            caption_stepper.grid_remove()
+        refresh_title_size_display()
+        refresh_caption_size_display()
         if more_open.get():
             root.after_idle(_fit_window)
 
