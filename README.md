@@ -37,10 +37,12 @@ Legacy configs that only had `"host"` / `"port"` are still read and upgraded aut
 
 ## Requirements
 
-Python 3 with tkinter, plus:
+Python 3 with **tkinter**, plus:
 
 ```text
 pip install -r requirements.txt
 ```
 
-Uses **CustomTkinter** and **Pillow** for the print dialog UI and preview.
+Uses **Pillow** for the label preview. Run `mini_label.py` from this repo folder (not an old unzipped copy).
+
+If the window still fails to stay open, check `label_printer_error.log` next to the script.
