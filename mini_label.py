@@ -213,6 +213,14 @@ _TEXT_ONLY_MAX_LINES = 8
 _AUTHOR = "Anton"
 _STAMP_FONT_H = 16
 _STAMP_FONT_W = 12
+# ^FB line gap (dots). Must match block_h math used for vertical centering.
+_FB_LINE_GAP = 0
+# Zebra ^A0 cells have more empty ascent than descent; nudge middle-aligned
+# text down so the ink looks centered (scales with font size).
+_OPTICAL_CENTER_BIAS = 0.18
+# Slightly optimistic wrap width so we don't invent a blank second line when
+# our char-width model is a touch wider than the printer's real glyphs.
+_WRAP_WIDTH_SLACK = 1.08
 # Relative advance widths as fractions of font height (calibrated so
 # ABCDEFGHIJKLMNOPQRSTUVWXY ≈ fills the printable width).
 _CHAR_WIDTH_SPACE = 0.28
@@ -597,28 +605,44 @@ def _fit_text_to_width(
     return FittedText(clipped, h, w, shrunk, clipped != text)
 
 
-def _estimate_wrapped_lines(text: str, font_h: int, block_w: float) -> int:
+def _estimate_wrapped_lines(
+    text: str, font_h: int, block_w: float, *, slack: float = 1.0
+) -> int:
+    """Estimate wrapped line count. slack>1 makes wrap slightly optimistic."""
     words = text.split()
     if not words:
         return 1
+    width = max(1.0, float(block_w) * max(1.0, slack))
     lines = 1
     used = 0.0
     space = _char_width_dots(" ", font_h)
     for word in words:
         ww = _text_width_dots(word, font_h)
-        if ww > block_w:
+        if ww > width:
             # Very long token: rough char-wrap estimate.
-            lines += max(1, int(ww // max(1.0, block_w)))
-            used = ww % max(1.0, block_w)
+            lines += max(1, int(ww // width))
+            used = ww % width
             continue
         if used == 0:
             used = ww
-        elif used + space + ww <= block_w:
+        elif used + space + ww <= width:
             used += space + ww
         else:
             lines += 1
             used = ww
     return max(1, lines)
+
+
+def _text_block_height(font_h: int, lines: int, *, line_gap: int = _FB_LINE_GAP) -> int:
+    lines = max(1, int(lines))
+    return lines * font_h + max(0, lines - 1) * line_gap
+
+
+def _optical_center_nudge(font_h: int, v_align: str = "middle") -> int:
+    """Shift middle-aligned ^A0 text down so glyphs look centered in the cell."""
+    if v_align != "middle":
+        return 0
+    return max(0, int(round(font_h * _OPTICAL_CENTER_BIAS)))
 
 
 def _fit_note_text(
@@ -693,10 +717,12 @@ def _text_zpl(
     block_w: int,
     *,
     max_lines: int = 1,
+    line_gap: int = _FB_LINE_GAP,
 ) -> str:
     zpl_align = _H_ALIGN[h_align]
+    gap = max(0, int(line_gap))
     return (
-        f"^FO{x},{y}^FB{block_w},{max_lines},0,{zpl_align},0"
+        f"^FO{x},{y}^FB{block_w},{max_lines},{gap},{zpl_align},0"
         f"^A0N,{font_h},{font_w}^FD{_zpl_field(text)}^FS"
     )
 
@@ -742,20 +768,28 @@ def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildRes
     block_w = _LABEL_WIDTH - 2 * margin
     available = max(prefer_h, bottom - margin)
     # Provisional line budget at preferred size, then refit after shrink.
-    max_lines = max(1, min(_TEXT_ONLY_MAX_LINES, available // max(1, prefer_h + 4)))
+    line_pitch = prefer_h + _FB_LINE_GAP
+    max_lines = max(1, min(_TEXT_ONLY_MAX_LINES, available // max(1, line_pitch)))
     fitted = _fit_note_text(title, prefer_h, prefer_w, float(block_w), max_lines)
-    max_lines = max(
-        1, min(_TEXT_ONLY_MAX_LINES, available // max(1, fitted.font_h + 4))
-    )
+    line_pitch = fitted.font_h + _FB_LINE_GAP
+    max_lines = max(1, min(_TEXT_ONLY_MAX_LINES, available // max(1, line_pitch)))
     # If shrink unlocked more lines, try once more at the fitted size.
     fitted = _fit_note_text(
         title, prefer_h, prefer_w, float(block_w), max_lines
     )
+    # Optimistic wrap avoids reserving a blank line the printer never draws.
     est_lines = min(
         max_lines,
-        _estimate_wrapped_lines(fitted.text, fitted.font_h, float(block_w)),
+        _estimate_wrapped_lines(
+            fitted.text,
+            fitted.font_h,
+            float(block_w),
+            slack=_WRAP_WIDTH_SLACK,
+        ),
     )
-    block_h = est_lines * (fitted.font_h + 4) - 4
+    # ^FB max_lines must match the height we centered — not a larger budget.
+    paint_lines = est_lines
+    block_h = _text_block_height(fitted.font_h, paint_lines)
     content_h = max(0, bottom - margin)
     if v_align == "top":
         y = margin
@@ -763,6 +797,8 @@ def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildRes
         y = max(margin, bottom - block_h)
     else:
         y = margin + max(0, (content_h - block_h) // 2)
+        y += _optical_center_nudge(fitted.font_h, v_align)
+        y = min(y, max(margin, bottom - block_h))
     warnings: list[str] = []
     if fitted.shrunk:
         warnings.append("Note text shrunk to fit")
@@ -776,7 +812,8 @@ def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildRes
             fitted.font_w,
             h_align,
             block_w,
-            max_lines=max_lines,
+            max_lines=paint_lines,
+            line_gap=_FB_LINE_GAP,
         )
         + (_signature_zpl(margin) if layout.show_footer else "")
         + f"^PQ{copies}"
@@ -870,7 +907,11 @@ def _build_side_zpl(
         y0 = max(margin, bottom - block_h)
     else:
         y0 = margin + max(0, (content_h - block_h) // 2)
+    # Center title against the barcode cell, then optical-nudge glyph ink down.
     title_y = y0 + max(0, (bar_h - fitted_title.font_h) // 2)
+    if fitted_title.text:
+        title_y += _optical_center_nudge(fitted_title.font_h, "middle")
+        title_y = min(title_y, y0 + max(0, bar_h - fitted_title.font_h))
 
     # Horizontal placement of the title+barcode unit.
     unit_w = title_span + bar_w
