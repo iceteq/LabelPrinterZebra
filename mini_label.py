@@ -1119,11 +1119,14 @@ def _build_zpl(
 
 _UI_SCALE = 2
 _PREVIEW_DEBOUNCE_MS = 350
-_PREVIEW_MAX_WIDTH = 520
-_PREVIEW_MAX_HEIGHT = 220
+_PREVIEW_MAX_WIDTH = 420
+_PREVIEW_MAX_HEIGHT = 200
 _BUTTON_GAP = 14
 _STATUS_MAX_CHARS = 72
 _SUCCESS_HOLD_MS = 1100
+# One-click title prefixes under the Title field.
+_TITLE_CHIPS = ("Act", "S/N", "Req", "Ord")
+_WINDOW_BOTTOM_MARGIN = 20
 # Calm workshop palette — cool mist + deep slate ink + quiet teal.
 # Psychology: soft ground lowers arousal; high-contrast type aids scanning;
 # teal CTA signals “go” without alarm (unlike red) or SaaS-purple cliché.
@@ -1302,6 +1305,33 @@ def _work_area_origin_and_size(window: tk.Tk) -> tuple[int, int, int, int]:
     return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
 
 
+def _place_window(
+    window: tk.Misc,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    min_width: int = 0,
+    anchor: str = "center",
+) -> None:
+    """Size and place a window. anchor: center | bottom (bottom-center of work area)."""
+    window.update_idletasks()
+    width = max(width or window.winfo_reqwidth(), min_width)
+    height = height or window.winfo_reqheight()
+    area_x, area_y, area_w, area_h = _work_area_origin_and_size(window)
+    width = min(width, max(320, area_w - 24))
+    height = min(height, max(320, area_h - 24))
+    x = area_x + max(0, (area_w - width) // 2)
+    if anchor == "bottom":
+        y = area_y + max(0, area_h - height - _WINDOW_BOTTOM_MARGIN)
+    else:
+        y = area_y + max(0, (area_h - height) // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
+    try:
+        window.deiconify()
+    except tk.TclError:
+        pass
+
+
 def _center_window(
     window: tk.Misc,
     *,
@@ -1309,19 +1339,9 @@ def _center_window(
     height: int | None = None,
     min_width: int = 0,
 ) -> None:
-    window.update_idletasks()
-    width = max(width or window.winfo_reqwidth(), min_width)
-    height = height or window.winfo_reqheight()
-    area_x, area_y, area_w, area_h = _work_area_origin_and_size(window)
-    width = min(width, max(320, area_w - 24))
-    height = min(height, max(480, area_h - 24))
-    x = area_x + max(0, (area_w - width) // 2)
-    y = area_y + max(0, (area_h - height) // 2)
-    window.geometry(f"{width}x{height}+{x}+{y}")
-    try:
-        window.deiconify()
-    except tk.TclError:
-        pass
+    _place_window(
+        window, width=width, height=height, min_width=min_width, anchor="center"
+    )
 
 
 def _parse_args():
@@ -1331,7 +1351,7 @@ def _parse_args():
         "title",
         nargs="?",
         default="",
-        help="Default text for the label title field (e.g. Act, Serienummer, Req)",
+        help="Optional title seed (everyday launch leaves this empty)",
     )
     parser.add_argument(
         "--look",
@@ -1468,6 +1488,7 @@ def _apply_ttk_theme(root: tk.Misc, ui_font: str) -> None:
     )
     style.configure("Align.TButton", font=(ui_font, 10), padding=(8, 4))
     style.configure("AlignOn.TButton", font=(ui_font, 10, "bold"), padding=(8, 4))
+    style.configure("Chip.TButton", font=(ui_font, 10), padding=(8, 3))
     style.map(
         "AlignOn.TButton",
         background=[("!disabled", t["accent"]), ("pressed", t["accent_hover"]), ("active", t["accent_hover"])],
@@ -1725,11 +1746,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     card = ttk.Frame(outer, style="Card.TFrame", padding=16)
     card.pack(side=tk.TOP, fill="both", expand=True)
     card.grid_columnconfigure(0, weight=1)
-
-    ttk.Label(card, text="Label", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
-    ttk.Label(card, text="What you see is what prints", style="Hint.TLabel").grid(
-        row=1, column=0, sticky="w", pady=(2, 12)
-    )
+    card.grid_columnconfigure(1, weight=1)
 
     printer_store = {"value": _load_printer_store()}
     auto_look = {"busy": False}
@@ -1744,14 +1761,15 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     preview_queue: queue.Queue = queue.Queue()
     close_armed_at = {"ms": 0}
 
-    content = ttk.Frame(card, style="Card.TFrame")
-    content.grid(row=2, column=0, sticky="we")
-    content.grid_columnconfigure(0, weight=1)
+    # Wide layout: form left, live preview right.
+    form = ttk.Frame(card, style="Card.TFrame")
+    form.grid(row=0, column=0, sticky="nwe", padx=(0, 12))
+    form.grid_columnconfigure(0, weight=1)
 
-    if not default_title.strip() and layout.look in (_DEFAULT_LOOK, _NOTE_LOOK):
-        initial_look_title = _NOTE_LOOK_TITLE
-    else:
-        initial_look_title = _look_title_for_id(layout.look)
+    # Everyday launch starts blank — ignore preset titles from old hotkeys/CLI.
+    title_var = tk.StringVar(value="")
+    serial_var = tk.StringVar()
+    initial_look_title = _NOTE_LOOK_TITLE
     look_title_var = tk.StringVar(value=initial_look_title)
     note_size_var = tk.StringVar(value=layout.note_size)
     note_align_var = tk.StringVar(value=layout.note_align)
@@ -1762,9 +1780,6 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     # Copies are never persisted — always start at 1.
     copies_var = tk.StringVar(value="1")
     printer_var = tk.StringVar(value=printer_store["value"].selected)
-
-    title_var = tk.StringVar(value=default_title)
-    serial_var = tk.StringVar()
 
     def _on_inline_size_change() -> None:
         schedule_preview()
@@ -1782,11 +1797,11 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         else:
             note_size_var.set(value)
 
-    ttk.Label(content, text="Title", style="Field.TLabel").grid(row=0, column=0, sticky="w")
-    title_row = ttk.Frame(content, style="Card.TFrame")
-    title_row.grid(row=1, column=0, sticky="we", pady=(2, 10))
+    ttk.Label(form, text="Title", style="Field.TLabel").grid(row=0, column=0, sticky="w")
+    title_row = ttk.Frame(form, style="Card.TFrame")
+    title_row.grid(row=1, column=0, sticky="we", pady=(2, 4))
     title_row.grid_columnconfigure(0, weight=1)
-    title_entry = ttk.Entry(title_row, textvariable=title_var, width=32, font=(ui_font, 13))
+    title_entry = ttk.Entry(title_row, textvariable=title_var, width=28, font=(ui_font, 13))
     title_entry.grid(row=0, column=0, sticky="we")
     title_stepper, refresh_title_size_display = _pack_inline_size_stepper(
         title_row,
@@ -1796,12 +1811,27 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     )
     title_stepper.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
-    ttk.Label(content, text="Barcode", style="Field.TLabel").grid(row=2, column=0, sticky="w")
-    barcode_row = ttk.Frame(content, style="Card.TFrame")
-    barcode_row.grid(row=3, column=0, sticky="we", pady=(2, 0))
+    chip_row = ttk.Frame(form, style="Card.TFrame")
+    chip_row.grid(row=2, column=0, sticky="w", pady=(0, 10))
+
+    def apply_title_chip(value: str) -> None:
+        title_var.set(value)
+        focus_barcode()
+
+    for chip in _TITLE_CHIPS:
+        ttk.Button(
+            chip_row,
+            text=chip,
+            style="Chip.TButton",
+            command=lambda v=chip: apply_title_chip(v),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+    ttk.Label(form, text="Barcode", style="Field.TLabel").grid(row=3, column=0, sticky="w")
+    barcode_row = ttk.Frame(form, style="Card.TFrame")
+    barcode_row.grid(row=4, column=0, sticky="we", pady=(2, 0))
     barcode_row.grid_columnconfigure(0, weight=1)
     serial_entry = ttk.Entry(
-        barcode_row, textvariable=serial_var, width=32, font=(mono_font, 13)
+        barcode_row, textvariable=serial_var, width=28, font=(mono_font, 13)
     )
     serial_entry.grid(row=0, column=0, sticky="we")
     caption_stepper, refresh_caption_size_display = _pack_inline_size_stepper(
@@ -1813,24 +1843,26 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     caption_stepper.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
     stage = ttk.Frame(card, style="Stage.TFrame", padding=10)
-    stage.grid(row=3, column=0, sticky="we", pady=(14, 0))
+    stage.grid(row=0, column=1, sticky="nsew")
     stage.grid_columnconfigure(0, weight=1)
     stage.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
     # tk.Label holds the preview image reliably across themes.
     preview_label = tk.Label(
         stage,
-        text="Preparing preview…",
+        text="Preview",
         bg=t["stage"],
         fg=t["muted"],
         font=(ui_font, 11),
         anchor="center",
         justify="center",
+        width=36,
+        height=10,
     )
     preview_label.grid(row=0, column=0, sticky="nsew")
 
     status_var = tk.StringVar(value="")
     status_label = ttk.Label(card, textvariable=status_var, style="Status.TLabel")
-    status_label.grid(row=4, column=0, sticky="w", pady=(8, 0))
+    status_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
     more = ttk.Frame(card, style="More.TFrame", padding=(0, 8, 0, 0))
     more.grid_columnconfigure(1, weight=1)
@@ -1958,23 +1990,27 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         root.update_idletasks()
         card.update_idletasks()
         actions.update_idletasks()
-        # Actions sit outside the card so Close/Print stay pinned and visible
-        # whether More options is open or closed.
+        # Wide short dialog, pinned to the bottom so it doesn't cover work above.
         pad = 36
-        needed_w = max(520, card.winfo_reqwidth() + pad, actions.winfo_reqwidth() + pad)
+        needed_w = max(760, card.winfo_reqwidth() + pad, actions.winfo_reqwidth() + pad)
         needed_h = card.winfo_reqheight() + actions.winfo_reqheight() + pad
-        # Never size shorter than the pinned action bar + a usable card.
-        min_h = actions.winfo_reqheight() + pad + 360
+        min_h = actions.winfo_reqheight() + pad + 240
         needed_h = max(needed_h, min_h)
         try:
-            root.minsize(520, min_h)
+            root.minsize(720, min_h)
         except tk.TclError:
             pass
-        _center_window(root, width=needed_w, height=needed_h, min_width=520)
+        _place_window(
+            root,
+            width=needed_w,
+            height=needed_h,
+            min_width=720,
+            anchor="bottom",
+        )
 
     def toggle_more(*_args: object) -> None:
         if more_open.get():
-            more.grid(row=5, column=0, sticky="we", pady=(10, 0))
+            more.grid(row=2, column=0, columnspan=2, sticky="we", pady=(10, 0))
             more_button.configure(text="Less")
         else:
             more.grid_remove()
@@ -2265,9 +2301,20 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     update_mode_chrome()
     persist_settings()
 
+    def focus_title() -> None:
+        title_entry.focus_set()
+        try:
+            title_entry.selection_range(0, tk.END)
+        except tk.TclError:
+            pass
+
+    def on_title_return(_event=None):
+        focus_barcode()
+        return "break"
+
     for sequence in ("<Return>", "<KP_Enter>"):
         serial_entry.bind(sequence, lambda _event: on_print())
-        title_entry.bind(sequence, lambda _event: on_print())
+        title_entry.bind(sequence, on_title_return)
     root.bind("<Escape>", on_escape)
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
@@ -2277,10 +2324,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             root.attributes("-topmost", True)
         except tk.TclError:
             pass
-        if default_title.strip():
-            focus_barcode()
-        else:
-            title_entry.focus_set()
+        # Always start on Title — chips and typing fill it; barcode is next.
+        focus_title()
 
     def report_callback_exception(exc_type, exc_value, exc_traceback) -> None:
         try:
