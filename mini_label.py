@@ -1497,12 +1497,24 @@ def _apply_ttk_theme(root: tk.Misc, ui_font: str) -> None:
     style.configure(
         "Chip.TButton",
         font=(ui_font, 9),
-        padding=(5, 1),
+        padding=(4, 0),
         foreground=t["muted"],
+        background=t["surface"],
+        bordercolor=t["line"],
+        lightcolor=t["surface"],
+        darkcolor=t["line"],
+        focuscolor=t["surface"],
+        relief="flat",
+        borderwidth=1,
     )
     style.map(
         "Chip.TButton",
         foreground=[("!disabled", t["muted"]), ("active", t["ink"]), ("pressed", t["ink"])],
+        background=[
+            ("!disabled", t["surface"]),
+            ("active", t["accent_soft"]),
+            ("pressed", t["accent_soft"]),
+        ],
     )
     style.map(
         "AlignOn.TButton",
@@ -1761,7 +1773,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     card = ttk.Frame(outer, style="Card.TFrame", padding=16)
     card.pack(side=tk.TOP, fill="both", expand=True)
     card.grid_columnconfigure(0, weight=1)
-    card.grid_columnconfigure(1, weight=1)
+    # Preview column sized to the capped stage — no stretchy empty gray.
+    card.grid_columnconfigure(1, minsize=_PREVIEW_MAX_WIDTH + 28, weight=0)
 
     printer_store = {"value": _load_printer_store()}
     auto_look = {"busy": False}
@@ -1858,7 +1871,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     caption_stepper.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
     stage = ttk.Frame(card, style="Stage.TFrame", padding=6)
-    stage.grid(row=0, column=1, sticky="n")
+    # new = fill column width, stay top-aligned (no tall empty stage).
+    stage.grid(row=0, column=1, sticky="new")
     stage.grid_columnconfigure(0, weight=1)
     stage.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
     # tk.Label holds the preview image reliably across themes.
@@ -1870,10 +1884,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         font=(ui_font, 11),
         anchor="center",
         justify="center",
-        width=32,
-        height=6,
     )
-    preview_label.grid(row=0, column=0, sticky="n")
+    preview_label.grid(row=0, column=0, sticky="nsew")
 
     status_var = tk.StringVar(value="")
     status_label = ttk.Label(card, textvariable=status_var, style="Status.TLabel")
