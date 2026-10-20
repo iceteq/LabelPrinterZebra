@@ -27,7 +27,9 @@ Small Python script that sends ZPL to a Zebra printer on your network over a raw
 | `printer_config.example.json` | Yes | Example multi-printer shape (dummy IP). |
 | `printer_config.json` | **No** (gitignored) | Your real printers + which one is selected. |
 
-Everyday use is just **Title**, **Barcode**, preview, and **Print**. Look, note size, alignment, copies, and printer management stay under **More options**.
+Everyday use is **Title**, quick chips (**Act · S/N · Req · Ord**), **Barcode**, preview, and **Print**. Look, alignment, copies, and printer management stay under **More**.
+
+The dialog is wide (preview on the right) and opens at the **bottom** of the screen. Launch with **Ctrl+Alt+L** (`print_label.ahk`) — title starts empty. Enter in Title moves to Barcode; Enter in Barcode prints.
 
 Default look is **Quiet**. Text-only labels stay in **Note** mode (Look is disabled until a barcode is entered). Notes support sizes through **XXL** and Left / Right / Top / Bottom / Center alignment. Copies always start at **1**.
 
