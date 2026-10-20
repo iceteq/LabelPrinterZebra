@@ -2222,16 +2222,9 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         n = preview_state["printed"]
         session_var.set(f"{n} printed" if n > 1 else "1 printed")
         set_status("ok", f"Sent to {printer_name} ✓")
-        set_printing(True)
-        reset_copies()
-        serial_var.set("")
-        root.after(50, focus_barcode)
-        root.after(
-            _SUCCESS_HOLD_MS,
-            lambda: set_status("info", "")
-            if status_var.get().startswith("Sent")
-            else None,
-        )
+        set_printing(False)
+        # One-shot: close after a short success flash; Ctrl+Alt+L opens again.
+        root.after(min(450, _SUCCESS_HOLD_MS), on_cancel)
 
     def on_print() -> None:
         title = title_var.get().strip()

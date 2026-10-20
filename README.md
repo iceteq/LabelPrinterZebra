@@ -29,7 +29,7 @@ Small Python script that sends ZPL to a Zebra printer on your network over a raw
 
 Everyday use is **Title**, quick chips (**Act · S/N · Req · Ord**), **Barcode**, preview, and **Print**. Look, alignment, copies, and printer management stay under **More**.
 
-The dialog is wide (preview on the right) and opens at the **bottom** of the screen. Launch with **Ctrl+Alt+L** (`print_label.ahk`) — title starts empty. Enter in Title moves to Barcode; Enter in Barcode prints.
+The dialog is wide (preview on the right) and opens at the **bottom** of the screen. Launch with **Ctrl+Alt+L** (`print_label.ahk`) — title starts empty. Enter in Title moves to Barcode; Enter in Barcode prints. After a successful print the dialog closes; press **Ctrl+Alt+L** again for the next label. The hotkey uses **pythonw** so no black console window appears.
 
 Default look is **Quiet**. Text-only labels stay in **Note** mode (Look is disabled until a barcode is entered). Notes support sizes through **XXL** and Left / Right / Top / Bottom / Center alignment. Copies always start at **1**.
 
