@@ -1119,8 +1119,8 @@ def _build_zpl(
 
 _UI_SCALE = 2
 _PREVIEW_DEBOUNCE_MS = 350
-_PREVIEW_MAX_WIDTH = 420
-_PREVIEW_MAX_HEIGHT = 200
+_PREVIEW_MAX_WIDTH = 360
+_PREVIEW_MAX_HEIGHT = 160
 _BUTTON_GAP = 14
 _STATUS_MAX_CHARS = 72
 _SUCCESS_HOLD_MS = 1100
@@ -1217,20 +1217,26 @@ def _fetch_labelary_png(zpl: str) -> bytes:
 
 
 def _png_to_preview_image(
-    png_data: bytes, max_width: int = _PREVIEW_MAX_WIDTH
+    png_data: bytes,
+    max_width: int = _PREVIEW_MAX_WIDTH,
+    max_height: int = _PREVIEW_MAX_HEIGHT,
 ) -> ImageTk.PhotoImage:
     """Scale the label and seat it on a soft shadowed stage (figure–ground)."""
     label = Image.open(io.BytesIO(png_data)).convert("RGBA")
-    scale = min(1.0, max_width / max(1, label.width))
+    scale = min(
+        1.0,
+        max_width / max(1, label.width),
+        max_height / max(1, label.height),
+    )
     if scale < 1.0:
         label = label.resize(
             (max(1, int(label.width * scale)), max(1, int(label.height * scale))),
             Image.Resampling.LANCZOS,
         )
 
-    pad_x, pad_y = 18, 16
-    stage_w = label.width + pad_x * 2 + 10
-    stage_h = label.height + pad_y * 2 + 10
+    pad_x, pad_y = 12, 10
+    stage_w = label.width + pad_x * 2 + 8
+    stage_h = label.height + pad_y * 2 + 8
     stage = Image.new("RGBA", (stage_w, stage_h), (0, 0, 0, 0))
 
     shadow_layer = Image.new("RGBA", (stage_w, stage_h), (0, 0, 0, 0))
@@ -1488,7 +1494,28 @@ def _apply_ttk_theme(root: tk.Misc, ui_font: str) -> None:
     )
     style.configure("Align.TButton", font=(ui_font, 10), padding=(8, 4))
     style.configure("AlignOn.TButton", font=(ui_font, 10, "bold"), padding=(8, 4))
-    style.configure("Chip.TButton", font=(ui_font, 10), padding=(8, 3))
+    style.configure(
+        "Chip.TButton",
+        font=(ui_font, 9),
+        padding=(4, 0),
+        foreground=t["muted"],
+        background=t["surface"],
+        bordercolor=t["line"],
+        lightcolor=t["surface"],
+        darkcolor=t["line"],
+        focuscolor=t["surface"],
+        relief="flat",
+        borderwidth=1,
+    )
+    style.map(
+        "Chip.TButton",
+        foreground=[("!disabled", t["muted"]), ("active", t["ink"]), ("pressed", t["ink"])],
+        background=[
+            ("!disabled", t["surface"]),
+            ("active", t["accent_soft"]),
+            ("pressed", t["accent_soft"]),
+        ],
+    )
     style.map(
         "AlignOn.TButton",
         background=[("!disabled", t["accent"]), ("pressed", t["accent_hover"]), ("active", t["accent_hover"])],
@@ -1746,7 +1773,8 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     card = ttk.Frame(outer, style="Card.TFrame", padding=16)
     card.pack(side=tk.TOP, fill="both", expand=True)
     card.grid_columnconfigure(0, weight=1)
-    card.grid_columnconfigure(1, weight=1)
+    # Preview column sized to the capped stage — no stretchy empty gray.
+    card.grid_columnconfigure(1, minsize=_PREVIEW_MAX_WIDTH + 28, weight=0)
 
     printer_store = {"value": _load_printer_store()}
     auto_look = {"busy": False}
@@ -1824,7 +1852,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             text=chip,
             style="Chip.TButton",
             command=lambda v=chip: apply_title_chip(v),
-        ).pack(side=tk.LEFT, padx=(0, 6))
+        ).pack(side=tk.LEFT, padx=(0, 4))
 
     ttk.Label(form, text="Barcode", style="Field.TLabel").grid(row=3, column=0, sticky="w")
     barcode_row = ttk.Frame(form, style="Card.TFrame")
@@ -1842,8 +1870,9 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     )
     caption_stepper.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
-    stage = ttk.Frame(card, style="Stage.TFrame", padding=10)
-    stage.grid(row=0, column=1, sticky="nsew")
+    stage = ttk.Frame(card, style="Stage.TFrame", padding=6)
+    # new = fill column width, stay top-aligned (no tall empty stage).
+    stage.grid(row=0, column=1, sticky="new")
     stage.grid_columnconfigure(0, weight=1)
     stage.grid_rowconfigure(0, minsize=_PREVIEW_MAX_HEIGHT)
     # tk.Label holds the preview image reliably across themes.
@@ -1855,8 +1884,6 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         font=(ui_font, 11),
         anchor="center",
         justify="center",
-        width=36,
-        height=10,
     )
     preview_label.grid(row=0, column=0, sticky="nsew")
 
@@ -1994,7 +2021,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         pad = 36
         needed_w = max(760, card.winfo_reqwidth() + pad, actions.winfo_reqwidth() + pad)
         needed_h = card.winfo_reqheight() + actions.winfo_reqheight() + pad
-        min_h = actions.winfo_reqheight() + pad + 240
+        min_h = actions.winfo_reqheight() + pad + 180
         needed_h = max(needed_h, min_h)
         try:
             root.minsize(720, min_h)
