@@ -215,12 +215,15 @@ _STAMP_FONT_H = 16
 _STAMP_FONT_W = 12
 # ^FB line gap (dots). Must match block_h math used for vertical centering.
 _FB_LINE_GAP = 0
-# Zebra ^A0 cells have more empty ascent than descent; nudge middle-aligned
-# text down so the ink looks centered (scales with font size).
-_OPTICAL_CENTER_BIAS = 0.18
-# Slightly optimistic wrap width so we don't invent a blank second line when
-# our char-width model is a touch wider than the printer's real glyphs.
-_WRAP_WIDTH_SLACK = 1.08
+# Zebra ^A0 cells leave unused descender room under capitals. Notes center
+# using ink height (cap fill), not the full cell stack — otherwise XXL wraps
+# clamp to the top and every size drifts. Barcode titles still use the nudge.
+_OPTICAL_CENTER_BIAS = 0.16
+_CAP_CELL_FILL = 0.75  # measured ink height / font_h for ^A0 capitals
+# Optimistic wrap width: our char-width model runs wide vs real ^A0 glyphs.
+# Too low invents a phantom second line and parks single-line text too high
+# (e.g. "GAMLA ORDRAR" at XL). Too high under-counts wraps for XXL.
+_WRAP_WIDTH_SLACK = 1.14
 # Relative advance widths as fractions of font height (calibrated so
 # ABCDEFGHIJKLMNOPQRSTUVWXY ≈ fills the printable width).
 _CHAR_WIDTH_SPACE = 0.28
@@ -638,6 +641,21 @@ def _text_block_height(font_h: int, lines: int, *, line_gap: int = _FB_LINE_GAP)
     return lines * font_h + max(0, lines - 1) * line_gap
 
 
+def _optical_text_height(
+    font_h: int, lines: int, *, line_gap: int = _FB_LINE_GAP
+) -> int:
+    """Ink bounding-box height for vertically centering ^A0 capitals.
+
+    Uses cap fill on the last line and full cell pitch between lines so the
+    visible block (not empty descender pad) sits on the label midline.
+    """
+    lines = max(1, int(lines))
+    fill = max(1, int(round(font_h * _CAP_CELL_FILL)))
+    if lines == 1:
+        return fill
+    return (lines - 1) * (font_h + line_gap) + fill
+
+
 def _optical_center_nudge(font_h: int, v_align: str = "middle") -> int:
     """Shift middle-aligned ^A0 text down so glyphs look centered in the cell."""
     if v_align != "middle":
@@ -764,9 +782,12 @@ def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildRes
     prefer_h, prefer_w = _NOTE_SIZE[layout.note_size]
     h_align, v_align = _NOTE_ALIGN[layout.note_align]
     margin = _adaptive_margin(prefer_h >= 72)
-    bottom = _content_bottom(margin, show_footer=layout.show_footer)
+    # Center against the full label face. The footer stamp is a corner mark —
+    # reserving its band for centering pushed every size upward inconsistently.
+    inner_top = margin
+    inner_bottom = _LABEL_HEIGHT - margin
     block_w = _LABEL_WIDTH - 2 * margin
-    available = max(prefer_h, bottom - margin)
+    available = max(prefer_h, inner_bottom - inner_top)
     # Provisional line budget at preferred size, then refit after shrink.
     line_pitch = prefer_h + _FB_LINE_GAP
     max_lines = max(1, min(_TEXT_ONLY_MAX_LINES, available // max(1, line_pitch)))
@@ -790,15 +811,17 @@ def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildRes
     # ^FB max_lines must match the height we centered — not a larger budget.
     paint_lines = est_lines
     block_h = _text_block_height(fitted.font_h, paint_lines)
-    content_h = max(0, bottom - margin)
+    # Center the visible ink, not the empty descender pad under the last line.
+    optical_h = _optical_text_height(fitted.font_h, paint_lines)
+    content_h = max(0, inner_bottom - inner_top)
     if v_align == "top":
-        y = margin
+        y = inner_top
     elif v_align == "bottom":
-        y = max(margin, bottom - block_h)
+        y = max(inner_top, inner_bottom - optical_h)
     else:
-        y = margin + max(0, (content_h - block_h) // 2)
-        y += _optical_center_nudge(fitted.font_h, v_align)
-        y = min(y, max(margin, bottom - block_h))
+        y = inner_top + max(0, (content_h - optical_h) // 2)
+        # Allow unused descender into the bottom margin so large wraps can sit true-center.
+        y = max(inner_top, min(y, inner_bottom - optical_h))
     warnings: list[str] = []
     if fitted.shrunk:
         warnings.append("Note text shrunk to fit")
