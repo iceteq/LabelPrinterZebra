@@ -291,6 +291,35 @@ _NOTE_ALIGN = {
     "center": ("center", "middle"),
 }
 _DEFAULT_NOTE_ALIGN = "center"
+# Symbology for the payload field (More → Code).
+_CODE_TYPES = ("barcode", "qr")
+_CODE_TYPE_LABELS = {"barcode": "Barcode", "qr": "QR"}
+_DEFAULT_CODE_TYPE = "barcode"
+# QR model-2 byte capacity at ECC M (approx), index = version.
+_QR_BYTE_CAP_ECC_M = (
+    0,
+    14,
+    26,
+    42,
+    62,
+    84,
+    106,
+    122,
+    152,
+    180,
+    213,
+    251,
+    287,
+    331,
+    362,
+    412,
+    450,
+    504,
+    560,
+    624,
+    666,
+)
+_QR_ECC = "M"  # medium — reliable on 4×2 without eating capacity
 
 
 def _label_dots(width_in: float, height_in: float, dpmm: int) -> tuple[int, int]:
@@ -436,6 +465,22 @@ def _normalize_note_align(value: str) -> str:
     return key
 
 
+def _normalize_code_type(value: str) -> str:
+    key = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "code128": "barcode",
+        "code_128": "barcode",
+        "bar": "barcode",
+        "linear": "barcode",
+        "qrcode": "qr",
+        "qr_code": "qr",
+    }
+    key = aliases.get(key, key)
+    if key not in _CODE_TYPES:
+        raise ValueError(f"code type must be one of {list(_CODE_TYPES)}")
+    return key
+
+
 def _bump_size(current: str, delta: int) -> str:
     idx = _SIZE_STEPS.index(_normalize_size(current))
     return _SIZE_STEPS[max(0, min(len(_SIZE_STEPS) - 1, idx + delta))]
@@ -450,6 +495,7 @@ class LabelLayout:
     caption_size: str = _DEFAULT_TYPE_SIZE
     show_caption: bool = True  # human-readable text under barcode (Side title)
     show_footer: bool = True  # author · date stamp
+    code_type: str = _DEFAULT_CODE_TYPE  # barcode | qr
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "look", _normalize_look(self.look))
@@ -459,6 +505,11 @@ class LabelLayout:
         object.__setattr__(self, "caption_size", _normalize_size(self.caption_size))
         object.__setattr__(self, "show_caption", bool(self.show_caption))
         object.__setattr__(self, "show_footer", bool(self.show_footer))
+        object.__setattr__(self, "code_type", _normalize_code_type(self.code_type))
+
+    @property
+    def use_qr(self) -> bool:
+        return self.code_type == "qr"
 
     @property
     def recipe(self) -> LookRecipe:
@@ -499,6 +550,7 @@ def _load_label_settings() -> LabelLayout:
             caption_size=data.get("caption_size", _DEFAULT_TYPE_SIZE),
             show_caption=data.get("show_caption", True),
             show_footer=data.get("show_footer", True),
+            code_type=data.get("code_type", _DEFAULT_CODE_TYPE),
         )
     except (TypeError, ValueError):
         return LabelLayout()
@@ -514,6 +566,7 @@ def _save_label_settings(layout: LabelLayout) -> None:
         "caption_size": layout.caption_size,
         "show_caption": bool(layout.show_caption),
         "show_footer": bool(layout.show_footer),
+        "code_type": layout.code_type,
     }
     try:
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -753,6 +806,60 @@ def _barcode_zpl(x: int, y: int, payload: str, height: int, module: int) -> str:
     )
 
 
+def _qr_byte_length(payload: str) -> int:
+    return max(1, len(payload.encode("utf-8")))
+
+
+def _estimate_qr_modules(payload: str) -> int:
+    """Model-2 QR modules-per-side for payload at ECC M (byte mode)."""
+    need = _qr_byte_length(payload)
+    for version, capacity in enumerate(_QR_BYTE_CAP_ECC_M):
+        if version == 0:
+            continue
+        if capacity >= need:
+            return 21 + 4 * (version - 1)
+    # Over capacity — still emit; printer may truncate / fail scan.
+    return 21 + 4 * (len(_QR_BYTE_CAP_ECC_M) - 2)
+
+
+def _fit_qr_magnification(payload: str, max_side: int) -> tuple[int, int, int]:
+    """Return (magnification, modules, side_dots) that fits in max_side."""
+    modules = _estimate_qr_modules(payload)
+    max_side = max(21, int(max_side))
+    for mag in range(10, 0, -1):
+        side = modules * mag
+        if side <= max_side:
+            return mag, modules, side
+    return 1, modules, modules
+
+
+def _qr_warnings(magnification: int, modules: int, max_side: int) -> list[str]:
+    side = modules * magnification
+    if side > max_side:
+        return ["QR is dense — may be hard to scan"]
+    if magnification <= 2:
+        return ["QR modules are small — may be hard to scan"]
+    return []
+
+
+def _qr_zpl(
+    x: int,
+    y: int,
+    payload: str,
+    *,
+    magnification: int,
+    ecc: str = _QR_ECC,
+) -> str:
+    """Zebra ^BQ model-2 QR. Field data: <ECC><input_mode>,payload."""
+    mag = max(1, min(10, int(magnification)))
+    level = ecc if ecc in ("L", "M", "Q", "H") else "M"
+    # Automatic mode (A) picks byte/alphanumeric; CI28 header allows UTF-8.
+    return (
+        f"^FO{x},{y}^BQN,2,{mag}"
+        f"^FD{level}A,{_zpl_field(payload)}^FS"
+    )
+
+
 def _stamp_reserve(*, show_footer: bool = True) -> int:
     return (_STAMP_FONT_H + 14) if show_footer else 0
 
@@ -845,6 +952,146 @@ def _build_note_zpl(title: str, layout: LabelLayout, *, copies: int) -> BuildRes
     return BuildResult(zpl, tuple(warnings))
 
 
+def _build_side_qr_zpl(
+    title: str,
+    serial: str,
+    recipe: LookRecipe,
+    layout: LabelLayout,
+    *,
+    copies: int,
+) -> BuildResult:
+    """Side-title look with a QR code instead of a linear barcode."""
+    payload = _decode_barcode_input(serial)
+    margin = 40
+    gap = 10
+    warnings: list[str] = []
+    raw_title = " ".join(title.split()) if title.strip() else ""
+    title_pref_h, title_pref_w = layout.title_dims
+    show_caption = layout.show_caption
+    show_footer = layout.show_footer
+    title_col = 100
+    fitted_title = FittedText("", title_pref_h, title_pref_w, False, False)
+    if raw_title:
+        for _ in range(4):
+            title_col = max(
+                72,
+                min(160, int(_text_width_dots(raw_title, fitted_title.font_h or title_pref_h) + 12)),
+            )
+            fitted_title = _fit_text_to_width(
+                raw_title, title_pref_h, title_pref_w, float(title_col), _MIN_TITLE_H
+            )
+            new_col = max(
+                72,
+                min(160, int(_text_width_dots(fitted_title.text, fitted_title.font_h) + 12)),
+            )
+            if abs(new_col - title_col) <= 2:
+                title_col = new_col
+                break
+            title_col = new_col
+        if fitted_title.shrunk:
+            warnings.append("Title shrunk to fit")
+        if fitted_title.truncated:
+            warnings.append("Title shortened to fit")
+
+    h_align, v_align = _NOTE_ALIGN[layout.note_align]
+    title_on_left = h_align != "right"
+    title_span = (title_col + gap) if raw_title else 0
+    qr_max_w = _LABEL_WIDTH - 2 * margin - title_span
+    caption_pref_h, caption_pref_w = layout.caption_dims
+    gap_bc = max(14, int(caption_pref_h * 0.35)) if show_caption else 0
+    caption_h = caption_pref_h if show_caption else 0
+    quiet_pad = 8
+    bottom = _content_bottom(margin, show_footer=show_footer)
+    content_h = max(0, bottom - margin)
+    qr_max_h = max(40, content_h - gap_bc - caption_h - quiet_pad)
+    mag, modules, qr_side = _fit_qr_magnification(
+        payload, max(40, min(qr_max_w, qr_max_h))
+    )
+    warnings.extend(_qr_warnings(mag, modules, min(qr_max_w, qr_max_h)))
+    qr_span = qr_side + quiet_pad
+
+    fitted_caption = FittedText("", caption_pref_h, caption_pref_w, False, False)
+    if show_caption:
+        fitted_caption = _fit_text_to_width(
+            _caption_display(serial),
+            caption_pref_h,
+            caption_pref_w,
+            float(qr_max_w),
+            _MIN_CAPTION_H,
+        )
+        if fitted_caption.shrunk:
+            warnings.append("Caption shrunk to fit")
+        if fitted_caption.truncated:
+            warnings.append("Caption shortened to fit")
+        gap_bc = max(14, int(fitted_caption.font_h * 0.35))
+        caption_h = fitted_caption.font_h
+
+    block_h = qr_span + gap_bc + caption_h
+    if v_align == "top":
+        y0 = margin
+    elif v_align == "bottom":
+        y0 = max(margin, bottom - block_h)
+    else:
+        y0 = margin + max(0, (content_h - block_h) // 2)
+
+    title_y = y0 + max(0, (qr_side - fitted_title.font_h) // 2)
+    if fitted_title.text:
+        title_y += _optical_center_nudge(fitted_title.font_h, "middle")
+        title_y = min(title_y, y0 + max(0, qr_side - fitted_title.font_h))
+
+    unit_w = title_span + qr_side
+    block_w = _LABEL_WIDTH - 2 * margin
+    if h_align == "center":
+        unit_x = margin + max(0, (block_w - unit_w) // 2)
+    elif h_align == "right" and not raw_title:
+        unit_x = max(margin, _LABEL_WIDTH - margin - qr_side)
+    else:
+        unit_x = margin
+    if raw_title and not title_on_left:
+        qr_x = unit_x
+        title_x = unit_x + qr_side + gap
+        title_x = min(title_x, _LABEL_WIDTH - margin - title_col)
+        qr_x = max(margin, min(qr_x, title_x - gap - qr_side))
+    elif raw_title:
+        title_x = unit_x
+        qr_x = unit_x + title_col + gap
+    else:
+        title_x = margin
+        qr_x = unit_x
+
+    parts = [_zpl_header()]
+    if raw_title and fitted_title.text:
+        parts.append(
+            _text_zpl(
+                title_x,
+                title_y,
+                fitted_title.text,
+                fitted_title.font_h,
+                fitted_title.font_w,
+                "left",
+                title_col,
+            )
+        )
+    parts.append(_qr_zpl(qr_x, y0, payload, magnification=mag))
+    if show_caption:
+        parts.append(
+            _text_zpl(
+                qr_x,
+                y0 + qr_span + gap_bc,
+                fitted_caption.text,
+                fitted_caption.font_h,
+                fitted_caption.font_w,
+                "left" if title_on_left or h_align == "center" else "right",
+                max(qr_side, qr_max_w),
+            )
+        )
+    if show_footer:
+        parts.append(_signature_zpl(margin))
+    parts.append(f"^PQ{copies}")
+    parts.append("^XZ")
+    return BuildResult("".join(parts), tuple(dict.fromkeys(warnings)))
+
+
 def _build_side_zpl(
     title: str,
     serial: str,
@@ -853,6 +1100,10 @@ def _build_side_zpl(
     *,
     copies: int,
 ) -> BuildResult:
+    if layout.use_qr:
+        return _build_side_qr_zpl(
+            title, serial, recipe, layout, copies=copies
+        )
     payload = _decode_barcode_input(serial)
     margin = 40
     gap = 10
@@ -991,6 +1242,117 @@ def _build_side_zpl(
     return BuildResult("".join(parts), tuple(dict.fromkeys(warnings)))
 
 
+def _build_stack_qr_zpl(
+    title: str,
+    serial: str,
+    recipe: LookRecipe,
+    layout: LabelLayout,
+    *,
+    copies: int,
+) -> BuildResult:
+    """Stacked look with a QR code instead of a linear barcode."""
+    payload = _decode_barcode_input(serial)
+    warnings: list[str] = []
+    has_title = bool(title.strip())
+    title_pref_h, title_pref_w = layout.title_dims
+    caption_pref_h, caption_pref_w = layout.caption_dims
+    show_footer = layout.show_footer
+    show_caption = True  # stack looks always show caption under the code
+    dense = (title_pref_h + 180 + caption_pref_h) > 220
+    margin = _adaptive_margin(dense)
+    bottom = _content_bottom(margin, show_footer=show_footer)
+    block_w = _LABEL_WIDTH - 2 * margin
+
+    fitted_title = FittedText("", 0, 0, False, False)
+    if has_title:
+        fitted_title = _fit_text_to_width(
+            " ".join(title.split()),
+            title_pref_h,
+            title_pref_w,
+            float(block_w),
+            _MIN_TITLE_H,
+        )
+        if fitted_title.shrunk:
+            warnings.append("Title shrunk to fit")
+        if fitted_title.truncated:
+            warnings.append("Title shortened to fit")
+
+    fitted_caption = _fit_text_to_width(
+        _caption_display(serial),
+        caption_pref_h,
+        caption_pref_w,
+        float(block_w),
+        _MIN_CAPTION_H,
+    )
+    if fitted_caption.shrunk:
+        warnings.append("Caption shrunk to fit")
+    if fitted_caption.truncated:
+        warnings.append("Caption shortened to fit")
+
+    title_h = fitted_title.font_h if has_title else 0
+    gap_tb = max(6, int(title_h * 0.18)) if has_title else 0
+    # QR needs more air under the symbol than a linear barcode.
+    gap_bc = max(14, int(fitted_caption.font_h * 0.35)) if show_caption else 0
+    caption_h = fitted_caption.font_h if show_caption else 0
+    content_h = max(0, bottom - margin)
+    # Reserve a quiet-zone pad under the modules so caption never kisses the matrix.
+    quiet_pad = 8
+    qr_budget = content_h - title_h - gap_tb - gap_bc - caption_h - quiet_pad
+    mag, modules, qr_side = _fit_qr_magnification(
+        payload, max(40, min(block_w, qr_budget))
+    )
+    warnings.extend(_qr_warnings(mag, modules, min(block_w, max(40, qr_budget))))
+    qr_span = qr_side + quiet_pad
+
+    block_h = title_h + gap_tb + qr_span + gap_bc + caption_h
+    h_align, v_align = _NOTE_ALIGN[layout.note_align]
+    if v_align == "top":
+        y = margin
+    elif v_align == "bottom":
+        y = max(margin, bottom - block_h)
+    else:
+        y = margin + max(0, (content_h - block_h) // 2)
+
+    parts = [_zpl_header()]
+    if has_title:
+        parts.append(
+            _text_zpl(
+                margin,
+                y,
+                fitted_title.text,
+                fitted_title.font_h,
+                fitted_title.font_w,
+                h_align,
+                block_w,
+            )
+        )
+        y += title_h + gap_tb
+    if h_align == "left":
+        qr_x = margin
+    elif h_align == "right":
+        qr_x = max(margin, _LABEL_WIDTH - margin - qr_side)
+    else:
+        qr_x = margin + max(0, (block_w - qr_side) // 2)
+    parts.append(_qr_zpl(qr_x, y, payload, magnification=mag))
+    y += qr_span + gap_bc
+    parts.append(
+        _text_zpl(
+            margin,
+            y,
+            fitted_caption.text,
+            fitted_caption.font_h,
+            fitted_caption.font_w,
+            h_align,
+            block_w,
+        )
+    )
+    if show_footer:
+        parts.append(_signature_zpl(margin))
+    parts.append(f"^PQ{copies}")
+    parts.append("^XZ")
+    return BuildResult("".join(parts), tuple(dict.fromkeys(warnings)))
+
+
 def _build_stack_zpl(
     title: str,
     serial: str,
@@ -999,6 +1361,10 @@ def _build_stack_zpl(
     *,
     copies: int,
 ) -> BuildResult:
+    if layout.use_qr:
+        return _build_stack_qr_zpl(
+            title, serial, recipe, layout, copies=copies
+        )
     payload = _decode_barcode_input(serial)
     warnings: list[str] = []
     has_title = bool(title.strip())
@@ -1432,6 +1798,17 @@ def _parse_args():
         action="store_true",
         help="Show author/date footer stamp",
     )
+    parser.add_argument(
+        "--code-type",
+        choices=_CODE_TYPES,
+        default=saved.code_type,
+        help="Symbology for the payload field: barcode (Code 128) or qr",
+    )
+    parser.add_argument(
+        "--qr",
+        action="store_true",
+        help="Shortcut for --code-type qr",
+    )
     return parser.parse_args(), saved
 
 
@@ -1828,6 +2205,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     caption_size_var = tk.StringVar(value=layout.caption_size)
     show_caption_var = tk.BooleanVar(value=layout.show_caption)
     show_footer_var = tk.BooleanVar(value=layout.show_footer)
+    code_type_var = tk.StringVar(value=layout.code_type)
     # Copies are never persisted — always start at 1.
     copies_var = tk.StringVar(value="1")
     printer_var = tk.StringVar(value=printer_store["value"].selected)
@@ -2000,8 +2378,36 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         align_btns[key] = btn
     _paint_align_buttons()
 
+    code_row = ttk.Frame(more, style="More.TFrame")
+    code_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+    ttk.Label(code_row, text="Code", style="More.TLabel").pack(side=tk.LEFT)
+    code_btns: dict[str, ttk.Button] = {}
+
+    def _paint_code_buttons() -> None:
+        current = _normalize_code_type(code_type_var.get())
+        for key, btn in code_btns.items():
+            btn.configure(style="AlignOn.TButton" if key == current else "Align.TButton")
+
+    def _set_code_type(value: str) -> None:
+        code_type_var.set(_normalize_code_type(value))
+        _paint_code_buttons()
+        _on_setting_change()
+
+    code_host = ttk.Frame(code_row, style="More.TFrame")
+    code_host.pack(side=tk.LEFT, padx=(8, 0))
+    for key in _CODE_TYPES:
+        btn = ttk.Button(
+            code_host,
+            text=_CODE_TYPE_LABELS[key],
+            style="Align.TButton",
+            command=lambda k=key: _set_code_type(k),
+        )
+        btn.pack(side=tk.LEFT, padx=(0, 4))
+        code_btns[key] = btn
+    _paint_code_buttons()
+
     caption_row = ttk.Frame(more, style="More.TFrame")
-    caption_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+    caption_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
 
     def _on_caption_toggle() -> None:
         update_mode_chrome()
@@ -2016,7 +2422,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     ).pack(side=tk.LEFT)
 
     footer_row = ttk.Frame(more, style="More.TFrame")
-    footer_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
+    footer_row.grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
     ttk.Checkbutton(
         footer_row,
         text="Footer (name · date)",
@@ -2025,7 +2431,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         command=_on_setting_change,
     ).pack(side=tk.LEFT)
 
-    ttk.Label(more, text="Copies", style="More.TLabel").grid(row=5, column=0, sticky="w", pady=4)
+    ttk.Label(more, text="Copies", style="More.TLabel").grid(row=6, column=0, sticky="w", pady=4)
     copies_combo = ttk.Combobox(
         more,
         textvariable=copies_var,
@@ -2034,7 +2440,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         width=5,
         font=(ui_font, 11),
     )
-    copies_combo.grid(row=5, column=1, sticky="w", pady=4)
+    copies_combo.grid(row=6, column=1, sticky="w", pady=4)
 
     def _fit_window() -> None:
         root.update_idletasks()
@@ -2081,6 +2487,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             caption_size=caption_size_var.get(),
             show_caption=bool(show_caption_var.get()),
             show_footer=bool(show_footer_var.get()),
+            code_type=code_type_var.get(),
         )
 
     def persist_settings() -> None:
@@ -2414,6 +2821,7 @@ if __name__ == "__main__":
             show_footer = True
         elif args.no_footer:
             show_footer = False
+        code_type = "qr" if args.qr else args.code_type
         print_label(
             args.title,
             LabelLayout(
@@ -2424,6 +2832,7 @@ if __name__ == "__main__":
                 caption_size=args.caption_size,
                 show_caption=show_caption,
                 show_footer=show_footer,
+                code_type=code_type,
             ),
         )
     except Exception as exc:
