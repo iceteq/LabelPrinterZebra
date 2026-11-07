@@ -320,6 +320,14 @@ _QR_BYTE_CAP_ECC_M = (
     666,
 )
 _QR_ECC = "M"  # medium — reliable on 4×2 without eating capacity
+# Labelary/Zebra draw QR ink a few dots below ^FO (measured ≈10). Pad more for
+# real printers so captions never collide with the matrix.
+_QR_FO_TOP_INSET = 12
+_QR_BOTTOM_CLEAR = 16  # air under matrix before caption/footer
+_QR_MIN_MAG = 2  # prefer scannable modules when the label allows
+# Captions longer than this (or URL-like) are suppressed under QR — the code
+# already carries the payload; a crushed ellipsis line only causes overlap.
+_QR_CAPTION_MAX_CHARS = 48
 
 
 def _label_dots(width_in: float, height_in: float, dpmm: int) -> tuple[int, int]:
@@ -822,24 +830,61 @@ def _estimate_qr_modules(payload: str) -> int:
     return 21 + 4 * (len(_QR_BYTE_CAP_ECC_M) - 2)
 
 
-def _fit_qr_magnification(payload: str, max_side: int) -> tuple[int, int, int]:
-    """Return (magnification, modules, side_dots) that fits in max_side."""
+def _qr_field_height(side_dots: int) -> int:
+    """Dots from ^FO to clear printed QR ink (inset + matrix + bottom air)."""
+    return int(side_dots) + _QR_FO_TOP_INSET + _QR_BOTTOM_CLEAR
+
+
+def _fit_qr_magnification(
+    payload: str, max_side: int
+) -> tuple[int, int, int, bool]:
+    """Return (magnification, modules, side_dots, fits_in_budget).
+
+    side_dots is always modules*mag (true symbol size). fits_in_budget is False
+    when even mag=1 exceeds max_side — caller should drop caption/title or warn.
+    """
     modules = _estimate_qr_modules(payload)
     max_side = max(21, int(max_side))
     for mag in range(10, 0, -1):
         side = modules * mag
         if side <= max_side:
-            return mag, modules, side
-    return 1, modules, modules
+            return mag, modules, side, True
+    return 1, modules, modules, False
 
 
-def _qr_warnings(magnification: int, modules: int, max_side: int) -> list[str]:
-    side = modules * magnification
-    if side > max_side:
-        return ["QR is dense — may be hard to scan"]
-    if magnification <= 2:
+def _qr_warnings(magnification: int, modules: int, max_side: int, *, fits: bool) -> list[str]:
+    if not fits or modules * magnification > max_side:
+        return ["QR is large for this label — may print dense or clipped"]
+    if magnification < _QR_MIN_MAG:
         return ["QR modules are small — may be hard to scan"]
     return []
+
+
+def _qr_caption_candidate(
+    serial: str,
+    prefer_h: int,
+    prefer_w: int,
+    block_w: float,
+    *,
+    enabled: bool,
+) -> tuple[bool, FittedText, list[str]]:
+    """Decide whether a human caption should sit under the QR.
+
+    Long URLs belong in the code, not as a truncated line that collides with it.
+    """
+    empty = FittedText("", prefer_h, prefer_w, False, False)
+    if not enabled:
+        return False, empty, []
+    text = _caption_display(serial)
+    if not text:
+        return False, empty, []
+    url_like = "://" in text or text.lower().startswith("www.")
+    if url_like or len(text) > _QR_CAPTION_MAX_CHARS:
+        return False, empty, []
+    fitted = _fit_text_to_width(text, prefer_h, prefer_w, float(block_w), _MIN_CAPTION_H)
+    if fitted.truncated:
+        return False, fitted, []
+    return True, fitted, []
 
 
 def _qr_zpl(
@@ -961,13 +1006,14 @@ def _build_side_qr_zpl(
     copies: int,
 ) -> BuildResult:
     """Side-title look with a QR code instead of a linear barcode."""
+    del recipe  # geometry is driven by QR fit, not linear bar_h
     payload = _decode_barcode_input(serial)
     margin = 40
     gap = 10
     warnings: list[str] = []
     raw_title = " ".join(title.split()) if title.strip() else ""
     title_pref_h, title_pref_w = layout.title_dims
-    show_caption = layout.show_caption
+    caption_pref_h, caption_pref_w = layout.caption_dims
     show_footer = layout.show_footer
     title_col = 100
     fitted_title = FittedText("", title_pref_h, title_pref_w, False, False)
@@ -996,55 +1042,72 @@ def _build_side_qr_zpl(
     h_align, v_align = _NOTE_ALIGN[layout.note_align]
     title_on_left = h_align != "right"
     title_span = (title_col + gap) if raw_title else 0
+    # Center QR on the wide face — left/right only mirror the side title.
     qr_max_w = _LABEL_WIDTH - 2 * margin - title_span
-    caption_pref_h, caption_pref_w = layout.caption_dims
-    gap_bc = max(14, int(caption_pref_h * 0.35)) if show_caption else 0
-    caption_h = caption_pref_h if show_caption else 0
-    quiet_pad = 8
-    bottom = _content_bottom(margin, show_footer=show_footer)
-    content_h = max(0, bottom - margin)
-    qr_max_h = max(40, content_h - gap_bc - caption_h - quiet_pad)
-    mag, modules, qr_side = _fit_qr_magnification(
-        payload, max(40, min(qr_max_w, qr_max_h))
+    # Keep QR out of the footer stamp band when the stamp is on.
+    inner_top = margin
+    inner_bottom = _content_bottom(margin, show_footer=show_footer)
+    content_h = max(0, inner_bottom - inner_top)
+
+    show_cap, fitted_caption, cap_warn = _qr_caption_candidate(
+        serial,
+        caption_pref_h,
+        caption_pref_w,
+        float(qr_max_w),
+        enabled=layout.show_caption,
     )
-    warnings.extend(_qr_warnings(mag, modules, min(qr_max_w, qr_max_h)))
-    qr_span = qr_side + quiet_pad
+    warnings.extend(cap_warn)
 
-    fitted_caption = FittedText("", caption_pref_h, caption_pref_w, False, False)
-    if show_caption:
-        fitted_caption = _fit_text_to_width(
-            _caption_display(serial),
-            caption_pref_h,
-            caption_pref_w,
-            float(qr_max_w),
-            _MIN_CAPTION_H,
+    def _attempt(with_caption: bool) -> tuple[int, int, int, bool, int, int]:
+        gap_bc = (
+            max(14, int(fitted_caption.font_h * 0.35))
+            if with_caption and fitted_caption.text
+            else 0
         )
-        if fitted_caption.shrunk:
-            warnings.append("Caption shrunk to fit")
-        if fitted_caption.truncated:
-            warnings.append("Caption shortened to fit")
-        gap_bc = max(14, int(fitted_caption.font_h * 0.35))
-        caption_h = fitted_caption.font_h
+        caption_h = fitted_caption.font_h if with_caption and fitted_caption.text else 0
+        field_budget = max(40, content_h - gap_bc - caption_h)
+        side_budget = max(
+            21, field_budget - _QR_FO_TOP_INSET - _QR_BOTTOM_CLEAR
+        )
+        mag, modules, side, fits = _fit_qr_magnification(
+            payload, min(qr_max_w, side_budget)
+        )
+        return mag, modules, side, fits, gap_bc, caption_h
 
-    block_h = qr_span + gap_bc + caption_h
+    mag, modules, qr_side, fits, gap_bc, caption_h = _attempt(show_cap)
+    # Prefer a scannable mag: drop caption if that frees enough room.
+    if show_cap and (not fits or mag < _QR_MIN_MAG):
+        show_cap = False
+        mag, modules, qr_side, fits, gap_bc, caption_h = _attempt(False)
+    warnings.extend(
+        _qr_warnings(mag, modules, min(qr_max_w, content_h), fits=fits)
+    )
+
+    field_h = _qr_field_height(qr_side)
+    block_h = field_h + gap_bc + caption_h
     if v_align == "top":
-        y0 = margin
+        y0 = inner_top
     elif v_align == "bottom":
-        y0 = max(margin, bottom - block_h)
+        y0 = max(inner_top, inner_bottom - block_h)
     else:
-        y0 = margin + max(0, (content_h - block_h) // 2)
+        y0 = inner_top + max(0, (content_h - block_h) // 2)
+        y0 = max(inner_top, min(y0, inner_bottom - block_h))
 
-    title_y = y0 + max(0, (qr_side - fitted_title.font_h) // 2)
+    title_y = y0 + _QR_FO_TOP_INSET + max(0, (qr_side - fitted_title.font_h) // 2)
     if fitted_title.text:
         title_y += _optical_center_nudge(fitted_title.font_h, "middle")
-        title_y = min(title_y, y0 + max(0, qr_side - fitted_title.font_h))
+        title_y = min(
+            title_y,
+            y0 + _QR_FO_TOP_INSET + max(0, qr_side - fitted_title.font_h),
+        )
 
     unit_w = title_span + qr_side
     block_w = _LABEL_WIDTH - 2 * margin
-    if h_align == "center":
+    if h_align == "center" or not raw_title:
+        # Square QR reads best centered on 4×2 when there is no side title.
         unit_x = margin + max(0, (block_w - unit_w) // 2)
-    elif h_align == "right" and not raw_title:
-        unit_x = max(margin, _LABEL_WIDTH - margin - qr_side)
+    elif h_align == "right":
+        unit_x = max(margin, _LABEL_WIDTH - margin - unit_w)
     else:
         unit_x = margin
     if raw_title and not title_on_left:
@@ -1073,11 +1136,11 @@ def _build_side_qr_zpl(
             )
         )
     parts.append(_qr_zpl(qr_x, y0, payload, magnification=mag))
-    if show_caption:
+    if show_cap and fitted_caption.text:
         parts.append(
             _text_zpl(
                 qr_x,
-                y0 + qr_span + gap_bc,
+                y0 + field_h + gap_bc,
                 fitted_caption.text,
                 fitted_caption.font_h,
                 fitted_caption.font_w,
@@ -1251,16 +1314,19 @@ def _build_stack_qr_zpl(
     copies: int,
 ) -> BuildResult:
     """Stacked look with a QR code instead of a linear barcode."""
+    del recipe
     payload = _decode_barcode_input(serial)
     warnings: list[str] = []
     has_title = bool(title.strip())
     title_pref_h, title_pref_w = layout.title_dims
     caption_pref_h, caption_pref_w = layout.caption_dims
     show_footer = layout.show_footer
-    show_caption = True  # stack looks always show caption under the code
     dense = (title_pref_h + 180 + caption_pref_h) > 220
     margin = _adaptive_margin(dense)
-    bottom = _content_bottom(margin, show_footer=show_footer)
+    # Keep the matrix out of the footer stamp band when the stamp is on.
+    inner_top = margin
+    inner_bottom = _content_bottom(margin, show_footer=show_footer)
+    content_h = max(0, inner_bottom - inner_top)
     block_w = _LABEL_WIDTH - 2 * margin
 
     fitted_title = FittedText("", 0, 0, False, False)
@@ -1277,44 +1343,71 @@ def _build_stack_qr_zpl(
         if fitted_title.truncated:
             warnings.append("Title shortened to fit")
 
-    fitted_caption = _fit_text_to_width(
-        _caption_display(serial),
+    show_cap, fitted_caption, cap_warn = _qr_caption_candidate(
+        serial,
         caption_pref_h,
         caption_pref_w,
         float(block_w),
-        _MIN_CAPTION_H,
+        enabled=layout.show_caption,
     )
-    if fitted_caption.shrunk:
-        warnings.append("Caption shrunk to fit")
-    if fitted_caption.truncated:
-        warnings.append("Caption shortened to fit")
+    warnings.extend(cap_warn)
 
-    title_h = fitted_title.font_h if has_title else 0
-    gap_tb = max(6, int(title_h * 0.18)) if has_title else 0
-    # QR needs more air under the symbol than a linear barcode.
-    gap_bc = max(14, int(fitted_caption.font_h * 0.35)) if show_caption else 0
-    caption_h = fitted_caption.font_h if show_caption else 0
-    content_h = max(0, bottom - margin)
-    # Reserve a quiet-zone pad under the modules so caption never kisses the matrix.
-    quiet_pad = 8
-    qr_budget = content_h - title_h - gap_tb - gap_bc - caption_h - quiet_pad
-    mag, modules, qr_side = _fit_qr_magnification(
-        payload, max(40, min(block_w, qr_budget))
+    def _attempt(
+        with_title: bool, with_caption: bool
+    ) -> tuple[int, int, int, bool, int, int, int, int]:
+        title_h = fitted_title.font_h if with_title and fitted_title.text else 0
+        gap_tb = max(6, int(title_h * 0.18)) if title_h else 0
+        caption_h = (
+            fitted_caption.font_h if with_caption and fitted_caption.text else 0
+        )
+        gap_bc = max(14, int(caption_h * 0.35)) if caption_h else 0
+        field_budget = max(40, content_h - title_h - gap_tb - gap_bc - caption_h)
+        side_budget = max(
+            21, field_budget - _QR_FO_TOP_INSET - _QR_BOTTOM_CLEAR
+        )
+        mag, modules, side, fits = _fit_qr_magnification(
+            payload, min(block_w, side_budget)
+        )
+        return mag, modules, side, fits, title_h, gap_tb, gap_bc, caption_h
+
+    mag, modules, qr_side, fits, title_h, gap_tb, gap_bc, caption_h = _attempt(
+        has_title, show_cap
     )
-    warnings.extend(_qr_warnings(mag, modules, min(block_w, max(40, qr_budget))))
-    qr_span = qr_side + quiet_pad
+    # Drop caption first (long URLs), then shrink title room, to keep mag usable.
+    if show_cap and (not fits or mag < _QR_MIN_MAG):
+        show_cap = False
+        mag, modules, qr_side, fits, title_h, gap_tb, gap_bc, caption_h = _attempt(
+            has_title, False
+        )
+    if has_title and (not fits or mag < _QR_MIN_MAG):
+        # Last resort: keep a smaller title band by re-fitting at min title size.
+        fitted_title = _fit_text_to_width(
+            " ".join(title.split()),
+            _MIN_TITLE_H,
+            _MIN_TITLE_H,
+            float(block_w),
+            _MIN_TITLE_H,
+        )
+        mag, modules, qr_side, fits, title_h, gap_tb, gap_bc, caption_h = _attempt(
+            True, show_cap
+        )
+        if fitted_title.text:
+            warnings.append("Title shrunk to fit QR")
 
-    block_h = title_h + gap_tb + qr_span + gap_bc + caption_h
+    warnings.extend(_qr_warnings(mag, modules, block_w, fits=fits))
+    field_h = _qr_field_height(qr_side)
+    block_h = title_h + gap_tb + field_h + gap_bc + caption_h
     h_align, v_align = _NOTE_ALIGN[layout.note_align]
     if v_align == "top":
-        y = margin
+        y = inner_top
     elif v_align == "bottom":
-        y = max(margin, bottom - block_h)
+        y = max(inner_top, inner_bottom - block_h)
     else:
-        y = margin + max(0, (content_h - block_h) // 2)
+        y = inner_top + max(0, (content_h - block_h) // 2)
+        y = max(inner_top, min(y, inner_bottom - block_h))
 
     parts = [_zpl_header()]
-    if has_title:
+    if has_title and fitted_title.text and title_h:
         parts.append(
             _text_zpl(
                 margin,
@@ -1327,6 +1420,7 @@ def _build_stack_qr_zpl(
             )
         )
         y += title_h + gap_tb
+    # Square QR on a wide label: center the matrix unless user picked left/right.
     if h_align == "left":
         qr_x = margin
     elif h_align == "right":
@@ -1334,18 +1428,19 @@ def _build_stack_qr_zpl(
     else:
         qr_x = margin + max(0, (block_w - qr_side) // 2)
     parts.append(_qr_zpl(qr_x, y, payload, magnification=mag))
-    y += qr_span + gap_bc
-    parts.append(
-        _text_zpl(
-            margin,
-            y,
-            fitted_caption.text,
-            fitted_caption.font_h,
-            fitted_caption.font_w,
-            h_align,
-            block_w,
+    y += field_h + gap_bc
+    if show_cap and fitted_caption.text:
+        parts.append(
+            _text_zpl(
+                margin,
+                y,
+                fitted_caption.text,
+                fitted_caption.font_h,
+                fitted_caption.font_w,
+                h_align,
+                block_w,
+            )
         )
-    )
     if show_footer:
         parts.append(_signature_zpl(margin))
     parts.append(f"^PQ{copies}")
@@ -2391,6 +2486,7 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
     def _set_code_type(value: str) -> None:
         code_type_var.set(_normalize_code_type(value))
         _paint_code_buttons()
+        update_mode_chrome()
         _on_setting_change()
 
     code_host = ttk.Frame(code_row, style="More.TFrame")
@@ -2413,13 +2509,14 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
         update_mode_chrome()
         _on_setting_change()
 
-    ttk.Checkbutton(
+    caption_check = ttk.Checkbutton(
         caption_row,
-        text="Barcode caption",
+        text="Caption under code",
         variable=show_caption_var,
         style="More.TCheckbutton",
         command=_on_caption_toggle,
-    ).pack(side=tk.LEFT)
+    )
+    caption_check.pack(side=tk.LEFT)
 
     footer_row = ttk.Frame(more, style="More.TFrame")
     footer_row.grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
@@ -2537,15 +2634,18 @@ def _ask_label_fields(default_title: str = "", layout: LabelLayout | None = None
             set_look_title(_NOTE_LOOK_TITLE)
             look_combo.configure(state="disabled")
             look_id = _NOTE_LOOK
-        # Caption toggle is for Side title only.
-        show_cap_toggle = has_barcode and look_id == "side"
+        # Caption toggle: Side title barcodes, or any QR look (stack/side).
+        use_qr = _normalize_code_type(code_type_var.get()) == "qr"
+        show_cap_toggle = has_barcode and (look_id == "side" or use_qr)
         if show_cap_toggle:
             caption_row.grid()
         else:
             caption_row.grid_remove()
         # Caption size −/+ sits beside the barcode field when a caption applies.
         show_cap_size = has_barcode and (
-            look_id != "side" or bool(show_caption_var.get())
+            use_qr
+            or look_id != "side"
+            or bool(show_caption_var.get())
         )
         if show_cap_size:
             caption_stepper.grid()
